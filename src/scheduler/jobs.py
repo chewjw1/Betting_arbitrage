@@ -1,11 +1,12 @@
 """Scheduled jobs for data collection and arbitrage detection.
 
 This module runs automatic scans at configurable intervals:
-- Default: every 30 seconds (configurable via POLL_INTERVAL_SECONDS)
-- Collects data from all 6 platforms (3 API + 3 scraping)
+- API platforms (Kalshi, Polymarket, PredictIt): every 60 seconds (default)
+- Scraping platforms (DraftKings, FanDuel, IBKR): every 180 seconds (default)
 - Detects both cross-platform AND logical arbitrage
+- Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
-- Stores all data in PostgreSQL for dashboard viewing
+- Stores ALL opportunities in PostgreSQL for dashboard viewing
 
 Usage:
     python -m src.scheduler.jobs
@@ -15,7 +16,7 @@ Or via Docker:
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 import time
 from typing import Optional
@@ -34,8 +35,6 @@ from src.collectors import (
     DraftKingsCollector,
     FanDuelCollector,
     IBKRCollector,
-    API_COLLECTORS,
-    SCRAPING_COLLECTORS,
 )
 from src.collectors.base import MarketData
 from src.config import get_settings
@@ -51,38 +50,107 @@ logger = structlog.get_logger()
 settings = get_settings()
 
 
-class ArbitrageScanner:
-    """Main scanner that coordinates data collection and arbitrage detection.
+class NotificationDeduplicator:
+    """Track recently notified opportunities to avoid spam."""
 
-    Workflow:
-    1. Fetch markets from all enabled platforms (parallel where possible)
-    2. Store market data and price snapshots in database
-    3. Run cross-platform arbitrage detection (same event, different prices)
-    4. Run logical arbitrage detection (related events, probability inconsistencies)
-    5. Send Discord notifications for profitable opportunities
-    6. Store opportunities in database for dashboard
-    """
+    def __init__(self, cooldown_seconds: int = 300):
+        """Initialize deduplicator.
+
+        Args:
+            cooldown_seconds: Don't re-notify for same pair within this window.
+        """
+        self.cooldown_seconds = cooldown_seconds
+        # Key: "platform_a:market_id_a:platform_b:market_id_b" -> last_notified_time
+        self._notified: dict[str, datetime] = {}
+        self.logger = logger.bind(component="Deduplicator")
+
+    def _make_key(self, opp) -> str:
+        """Create a unique key for an opportunity."""
+        if hasattr(opp, 'market_a'):
+            # Cross-platform ArbitrageResult
+            parts = sorted([
+                f"{opp.market_a.platform}:{opp.market_a.platform_market_id}",
+                f"{opp.market_b.platform}:{opp.market_b.platform_market_id}",
+            ])
+        elif hasattr(opp, 'relationship'):
+            # LogicalArbitrageResult
+            rel = opp.relationship
+            parts = [
+                f"{rel.market_a.platform}:{rel.market_a.platform_market_id}",
+                f"{rel.relationship_type.value}",
+            ]
+            if rel.market_b.platform_market_id != rel.market_a.platform_market_id:
+                parts.append(f"{rel.market_b.platform}:{rel.market_b.platform_market_id}")
+        else:
+            return str(hash(str(opp)))
+
+        return ":".join(parts)
+
+    def should_notify(self, opp) -> bool:
+        """Check if we should send a notification for this opportunity.
+
+        Args:
+            opp: ArbitrageResult or LogicalArbitrageResult.
+
+        Returns:
+            True if we should notify, False if recently notified.
+        """
+        key = self._make_key(opp)
+        now = datetime.utcnow()
+
+        # Clean up old entries
+        self._cleanup()
+
+        if key in self._notified:
+            last_notified = self._notified[key]
+            age = (now - last_notified).total_seconds()
+            if age < self.cooldown_seconds:
+                self.logger.debug(
+                    "Skipping duplicate notification",
+                    key=key,
+                    age_seconds=age,
+                )
+                return False
+
+        return True
+
+    def mark_notified(self, opp) -> None:
+        """Mark an opportunity as notified."""
+        key = self._make_key(opp)
+        self._notified[key] = datetime.utcnow()
+        self.logger.debug("Marked as notified", key=key)
+
+    def _cleanup(self) -> None:
+        """Remove expired entries."""
+        now = datetime.utcnow()
+        cutoff = now - timedelta(seconds=self.cooldown_seconds * 2)
+        expired = [k for k, v in self._notified.items() if v < cutoff]
+        for k in expired:
+            del self._notified[k]
+
+
+class ArbitrageScanner:
+    """Main scanner that coordinates data collection and arbitrage detection."""
 
     def __init__(
         self,
         discord_bot=None,
         min_net_spread_pct: Optional[float] = None,
-        enable_scraping: bool = True,
-        enable_logical: bool = True,
     ):
         """Initialize scanner.
 
         Args:
             discord_bot: Optional Discord bot for notifications.
             min_net_spread_pct: Override minimum profit threshold.
-            enable_scraping: Whether to include scraping-based collectors.
-            enable_logical: Whether to run logical arbitrage detection.
         """
         self.discord_bot = discord_bot
         self.min_net_spread_pct = min_net_spread_pct or settings.min_net_spread_pct
-        self.enable_scraping = enable_scraping
-        self.enable_logical = enable_logical
         self.logger = logger.bind(component="ArbitrageScanner")
+
+        # Deduplicator for notifications
+        self.deduplicator = NotificationDeduplicator(
+            cooldown_seconds=settings.notification_cooldown_seconds
+        )
 
         # Cross-platform detector
         self.cross_platform_detector = CrossPlatformDetector(
@@ -98,41 +166,16 @@ class ArbitrageScanner:
             min_relationship_confidence=0.7,
         )
 
-    def _get_collectors(self) -> dict:
-        """Get collectors based on configuration.
-
-        Returns:
-            Dict of platform_name -> collector_instance
-        """
-        collectors = {}
-
-        # Always include API-based collectors (fast, reliable)
-        collectors["kalshi"] = KalshiCollector()
-        collectors["polymarket"] = PolymarketCollector()
-        collectors["predictit"] = PredictItCollector()
-
-        # Optionally include scraping-based collectors (slower, may fail)
-        if self.enable_scraping:
-            collectors["draftkings"] = DraftKingsCollector()
-            collectors["fanduel"] = FanDuelCollector()
-            collectors["ibkr"] = IBKRCollector()
-
-        return collectors
+        # Cached markets from last scrape (used when running API-only scans)
+        self._cached_scrape_markets: dict[str, list[MarketData]] = {}
+        self._last_scrape_time: Optional[datetime] = None
 
     async def _collect_from_platform(
         self,
         platform: str,
         collector,
     ) -> tuple[str, list[MarketData]]:
-        """Collect markets from a single platform.
-
-        Args:
-            platform: Platform name.
-            collector: Collector instance.
-
-        Returns:
-            Tuple of (platform_name, markets_list).
-        """
+        """Collect markets from a single platform."""
         try:
             async with collector:
                 markets = await collector.fetch_markets()
@@ -150,24 +193,23 @@ class ArbitrageScanner:
             )
             return (platform, [])
 
-    async def run_scan(self) -> dict:
-        """Run a complete scan across all platforms.
+    async def run_api_scan(self) -> dict:
+        """Run scan for API-based platforms only (fast, every 60s).
 
         Returns:
-            Dict with scan results:
-            {
-                "cross_platform": [ArbitrageResult, ...],
-                "logical": [LogicalArbitrageResult, ...],
-                "scan_time_seconds": float,
-                "markets_by_platform": {platform: count, ...},
-            }
+            Dict with scan results.
         """
         start_time = time.time()
-        self.logger.info("Starting arbitrage scan")
+        self.logger.info("Starting API scan")
 
-        collectors = self._get_collectors()
+        # API collectors only
+        collectors = {
+            "kalshi": KalshiCollector(),
+            "polymarket": PolymarketCollector(),
+            "predictit": PredictItCollector(),
+        }
 
-        # Collect from all platforms concurrently
+        # Collect in parallel
         tasks = [
             self._collect_from_platform(platform, collector)
             for platform, collector in collectors.items()
@@ -179,6 +221,79 @@ class ArbitrageScanner:
         for platform, markets in results:
             markets_by_platform[platform] = markets
 
+        # Include cached scrape data if available
+        if self._cached_scrape_markets:
+            markets_by_platform.update(self._cached_scrape_markets)
+
+        # Store and detect
+        return await self._process_markets(markets_by_platform, start_time, "api")
+
+    async def run_scrape_scan(self) -> dict:
+        """Run scan for scraping-based platforms (slow, every 3 min).
+
+        Returns:
+            Dict with scan results.
+        """
+        start_time = time.time()
+        self.logger.info("Starting scrape scan")
+
+        # Scraping collectors
+        collectors = {
+            "draftkings": DraftKingsCollector(),
+            "fanduel": FanDuelCollector(),
+            "ibkr": IBKRCollector(),
+        }
+
+        # Collect in parallel
+        tasks = [
+            self._collect_from_platform(platform, collector)
+            for platform, collector in collectors.items()
+        ]
+        results = await asyncio.gather(*tasks)
+
+        # Build and cache markets
+        scrape_markets: dict[str, list[MarketData]] = {}
+        for platform, markets in results:
+            scrape_markets[platform] = markets
+
+        self._cached_scrape_markets = scrape_markets
+        self._last_scrape_time = datetime.utcnow()
+
+        # Combine with API data for full scan
+        # First, get fresh API data
+        api_collectors = {
+            "kalshi": KalshiCollector(),
+            "polymarket": PolymarketCollector(),
+            "predictit": PredictItCollector(),
+        }
+        api_tasks = [
+            self._collect_from_platform(platform, collector)
+            for platform, collector in api_collectors.items()
+        ]
+        api_results = await asyncio.gather(*api_tasks)
+
+        markets_by_platform = dict(api_results)
+        markets_by_platform.update(scrape_markets)
+
+        # Store and detect
+        return await self._process_markets(markets_by_platform, start_time, "full")
+
+    async def _process_markets(
+        self,
+        markets_by_platform: dict[str, list[MarketData]],
+        start_time: float,
+        scan_type: str,
+    ) -> dict:
+        """Process collected markets: store, detect, notify.
+
+        Args:
+            markets_by_platform: Collected market data.
+            start_time: Scan start time.
+            scan_type: "api" or "full".
+
+        Returns:
+            Dict with results.
+        """
         # Store markets and prices in database
         await self._store_market_data(markets_by_platform)
 
@@ -186,60 +301,55 @@ class ArbitrageScanner:
         cross_platform_opps = self.cross_platform_detector.find_opportunities(
             markets_by_platform
         )
-        self.logger.info(
-            "Cross-platform scan complete",
-            opportunities=len(cross_platform_opps),
-        )
 
         # --- Logical Arbitrage Detection ---
-        logical_opps = []
-        if self.enable_logical:
-            # Combine all markets for logical analysis
-            all_markets = []
-            for markets in markets_by_platform.values():
-                all_markets.extend(markets)
+        all_markets = []
+        for markets in markets_by_platform.values():
+            all_markets.extend(markets)
 
-            logical_opps = self.logical_detector.find_opportunities(
-                all_markets,
-                position_size=Decimal(str(settings.max_position_size)),
-            )
-            self.logger.info(
-                "Logical arbitrage scan complete",
-                opportunities=len(logical_opps),
-            )
+        logical_opps = self.logical_detector.find_opportunities(
+            all_markets,
+            position_size=Decimal(str(settings.max_position_size)),
+        )
 
-        # Store and notify for cross-platform opportunities
+        # Store ALL opportunities in database (for dashboard)
+        # But only notify if not recently notified
+        notifications_sent = 0
+
         for opp in cross_platform_opps:
             opportunity_id = await self._store_opportunity(opp, "cross_platform")
-            if self.discord_bot and opportunity_id:
-                await self.discord_bot.send_opportunity(opp, opportunity_id)
 
-        # Store and notify for logical opportunities
+            # Check deduplication before notifying
+            if self.discord_bot and opportunity_id and self.deduplicator.should_notify(opp):
+                await self.discord_bot.send_opportunity(opp, opportunity_id)
+                self.deduplicator.mark_notified(opp)
+                notifications_sent += 1
+
         for opp in logical_opps:
             opportunity_id = await self._store_logical_opportunity(opp)
-            if self.discord_bot and opportunity_id:
+
+            if self.discord_bot and opportunity_id and self.deduplicator.should_notify(opp):
                 await self._send_logical_notification(opp, opportunity_id)
+                self.deduplicator.mark_notified(opp)
+                notifications_sent += 1
 
         scan_time = time.time() - start_time
 
         self.logger.info(
             "Scan complete",
+            scan_type=scan_type,
             duration_seconds=round(scan_time, 2),
-            cross_platform_opportunities=len(cross_platform_opps),
-            logical_opportunities=len(logical_opps),
+            cross_platform_found=len(cross_platform_opps),
+            logical_found=len(logical_opps),
+            notifications_sent=notifications_sent,
             total_markets=sum(len(m) for m in markets_by_platform.values()),
         )
 
-        # Send summary to Discord
-        if self.discord_bot:
-            await self.discord_bot.send_scan_summary(
-                cross_platform_opps + logical_opps,  # type: ignore
-                scan_time,
-            )
-
         return {
+            "scan_type": scan_type,
             "cross_platform": cross_platform_opps,
             "logical": logical_opps,
+            "notifications_sent": notifications_sent,
             "scan_time_seconds": scan_time,
             "markets_by_platform": {
                 p: len(m) for p, m in markets_by_platform.items()
@@ -255,7 +365,6 @@ class ArbitrageScanner:
             for platform, markets in markets_by_platform.items():
                 for market_data in markets:
                     try:
-                        # Check if market exists
                         query = select(Market).where(
                             Market.platform == market_data.platform,
                             Market.platform_market_id == market_data.platform_market_id,
@@ -264,7 +373,6 @@ class ArbitrageScanner:
                         market = result.scalar_one_or_none()
 
                         if market:
-                            # Update existing market
                             market.title = market_data.title
                             market.description = market_data.description
                             market.status = market_data.status
@@ -272,7 +380,6 @@ class ArbitrageScanner:
                             market.url = market_data.url
                             market.updated_at = datetime.utcnow()
                         else:
-                            # Create new market
                             market = Market(
                                 platform=market_data.platform,
                                 platform_market_id=market_data.platform_market_id,
@@ -287,7 +394,6 @@ class ArbitrageScanner:
                             session.add(market)
                             await session.flush()
 
-                        # Add price snapshot
                         if market_data.yes_price is not None:
                             price = Price(
                                 market_id=market.id,
@@ -315,7 +421,10 @@ class ArbitrageScanner:
         result: ArbitrageResult,
         opportunity_type: str = "cross_platform",
     ) -> Optional[str]:
-        """Store a cross-platform opportunity in the database."""
+        """Store a cross-platform opportunity in the database.
+
+        ALL opportunities are stored for dashboard viewing.
+        """
         async with async_session_factory() as session:
             try:
                 market_a_query = select(Market).where(
@@ -380,7 +489,6 @@ class ArbitrageScanner:
                 if not market_a_db:
                     return None
 
-                # For logical arb, market_b might be the same as market_a
                 market_b_db = market_a_db
                 if market_b.platform_market_id != market_a.platform_market_id:
                     market_b_query = select(Market).where(
@@ -441,26 +549,32 @@ class ArbitrageScanner:
             self.logger.error("Failed to send logical notification", error=str(e))
 
 
-# Global scanner instance (for scheduled job)
+# Global scanner instance
 _scanner: Optional[ArbitrageScanner] = None
 
 
-async def run_scanner():
-    """Run the scanner as a scheduled job."""
+async def run_api_scan():
+    """Run API-only scan (called every 60s)."""
     global _scanner
     if _scanner is None:
-        _scanner = ArbitrageScanner(
-            enable_scraping=settings.poll_interval_seconds >= 60,  # Only scrape if interval >= 1min
-            enable_logical=True,
-        )
-    await _scanner.run_scan()
+        _scanner = ArbitrageScanner()
+    await _scanner.run_api_scan()
+
+
+async def run_scrape_scan():
+    """Run full scan including scraping (called every 180s)."""
+    global _scanner
+    if _scanner is None:
+        _scanner = ArbitrageScanner()
+    await _scanner.run_scrape_scan()
 
 
 async def main():
     """Main entry point for the scheduler.
 
-    Runs automatic scans at the configured interval.
-    Default: every 30 seconds (set POLL_INTERVAL_SECONDS to change).
+    Runs two separate schedules:
+    - API scan: every 60 seconds (Kalshi, Polymarket, PredictIt)
+    - Scrape scan: every 180 seconds (DraftKings, FanDuel, IBKR)
     """
     global _scanner
 
@@ -470,44 +584,50 @@ async def main():
     await init_db()
 
     # Create scanner
-    # Only enable scraping if interval is long enough (scraping is slow)
-    enable_scraping = settings.poll_interval_seconds >= 60
-    _scanner = ArbitrageScanner(
-        enable_scraping=enable_scraping,
-        enable_logical=True,
-    )
+    _scanner = ArbitrageScanner()
 
     logger.info(
         "Scanner configured",
-        poll_interval=settings.poll_interval_seconds,
-        scraping_enabled=enable_scraping,
-        logical_enabled=True,
+        api_interval=settings.api_poll_interval_seconds,
+        scrape_interval=settings.scrape_poll_interval_seconds,
+        notification_cooldown=settings.notification_cooldown_seconds,
         min_profit_threshold=settings.min_net_spread_pct,
     )
 
     # Create scheduler
     scheduler = AsyncIOScheduler()
 
-    # Add scan job
+    # API scan job (every 60 seconds by default)
     scheduler.add_job(
-        run_scanner,
-        trigger=IntervalTrigger(seconds=settings.poll_interval_seconds),
-        id="arbitrage_scan",
-        name="Arbitrage Scanner",
+        run_api_scan,
+        trigger=IntervalTrigger(seconds=settings.api_poll_interval_seconds),
+        id="api_scan",
+        name="API Arbitrage Scanner",
         replace_existing=True,
-        max_instances=1,  # Don't overlap scans
+        max_instances=1,
+    )
+
+    # Scrape scan job (every 180 seconds by default)
+    scheduler.add_job(
+        run_scrape_scan,
+        trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
+        id="scrape_scan",
+        name="Scrape Arbitrage Scanner",
+        replace_existing=True,
+        max_instances=1,
     )
 
     # Start scheduler
     scheduler.start()
     logger.info(
-        "Scheduler started - scanning every %d seconds",
-        settings.poll_interval_seconds,
+        "Scheduler started",
+        api_interval=f"{settings.api_poll_interval_seconds}s",
+        scrape_interval=f"{settings.scrape_poll_interval_seconds}s",
     )
 
-    # Run initial scan immediately
-    logger.info("Running initial scan...")
-    await run_scanner()
+    # Run initial scans immediately
+    logger.info("Running initial scrape scan (includes all platforms)...")
+    await run_scrape_scan()
 
     # Keep running
     try:
