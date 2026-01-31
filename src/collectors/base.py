@@ -35,13 +35,40 @@ class MarketData:
     no_bid: Optional[Decimal] = None
     no_ask: Optional[Decimal] = None
 
-    # Volume
+    # Volume & Liquidity
     yes_volume: Optional[Decimal] = None
     no_volume: Optional[Decimal] = None
     total_volume: Optional[Decimal] = None
+    open_interest: Optional[Decimal] = None  # Total outstanding contracts
+    volume_24h: Optional[Decimal] = None  # 24-hour volume
+    liquidity: Optional[Decimal] = None  # Available liquidity in dollars
 
     # Metadata
     fetched_at: datetime = field(default_factory=datetime.utcnow)
+
+    @property
+    def days_to_resolution(self) -> Optional[int]:
+        """Calculate days until market resolves."""
+        if self.end_date is None:
+            return None
+        delta = self.end_date - datetime.utcnow()
+        return max(0, delta.days)
+
+    @property
+    def has_sufficient_liquidity(self) -> bool:
+        """Check if market has enough liquidity for trading."""
+        # Consider liquid if any volume metric suggests activity
+        min_volume = Decimal("100")  # $100 minimum
+        if self.volume_24h and self.volume_24h >= min_volume:
+            return True
+        if self.total_volume and self.total_volume >= Decimal("1000"):
+            return True
+        if self.liquidity and self.liquidity >= min_volume:
+            return True
+        # If no volume data, assume liquid (can't filter)
+        if self.volume_24h is None and self.total_volume is None and self.liquidity is None:
+            return True
+        return False
 
     def __post_init__(self):
         """Ensure prices are Decimals."""

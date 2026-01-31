@@ -38,6 +38,13 @@ class ArbitrageResult:
     position_size: Decimal
     notes: Optional[str] = None
 
+    # New fields for filtering
+    priority: str = "MEDIUM"  # HIGH, MEDIUM, LOW based on resolution time
+    days_to_resolution: Optional[int] = None
+    liquidity_a: Optional[Decimal] = None
+    liquidity_b: Optional[Decimal] = None
+    filtered_reason: Optional[str] = None  # If filtered out, why
+
     def __repr__(self) -> str:
         return (
             f"<ArbitrageResult {self.market_a.platform}/{self.market_b.platform} "
@@ -66,6 +73,10 @@ class ArbitrageResult:
             "position_size": float(self.position_size),
             "url_a": self.market_a.url,
             "url_b": self.market_b.url,
+            "priority": self.priority,
+            "days_to_resolution": self.days_to_resolution,
+            "liquidity_a": float(self.liquidity_a) if self.liquidity_a else None,
+            "liquidity_b": float(self.liquidity_b) if self.liquidity_b else None,
         }
 
 
@@ -76,17 +87,68 @@ class ArbitrageCalculator:
         self,
         min_net_spread_pct: float = 1.0,
         default_position_size: float = 100.0,
+        max_days_to_resolution: int = 90,
+        min_liquidity: float = 100.0,
+        require_liquidity_data: bool = False,
     ):
         """Initialize calculator.
 
         Args:
             min_net_spread_pct: Minimum net profit percentage to consider profitable.
             default_position_size: Default position size per side in dollars.
+            max_days_to_resolution: Maximum days until resolution (longer = capital locked).
+            min_liquidity: Minimum liquidity in dollars to consider.
+            require_liquidity_data: If True, skip markets without liquidity data.
         """
         self.min_net_spread_pct = Decimal(str(min_net_spread_pct))
         self.default_position_size = Decimal(str(default_position_size))
+        self.max_days_to_resolution = max_days_to_resolution
+        self.min_liquidity = Decimal(str(min_liquidity))
+        self.require_liquidity_data = require_liquidity_data
         self.fee_calculator = FeeCalculator()
         self.logger = logger.bind(component="ArbitrageCalculator")
+
+    def _check_resolution_date(self, market: MarketData) -> tuple[bool, Optional[str]]:
+        """Check if market resolves within acceptable timeframe.
+
+        Returns:
+            (passes_filter, reason_if_failed)
+        """
+        days = market.days_to_resolution
+        if days is None:
+            return True, None  # No date info, allow
+        if days > self.max_days_to_resolution:
+            return False, f"Resolves in {days} days (max {self.max_days_to_resolution})"
+        return True, None
+
+    def _check_liquidity(self, market: MarketData) -> tuple[bool, Optional[str]]:
+        """Check if market has sufficient liquidity.
+
+        Returns:
+            (passes_filter, reason_if_failed)
+        """
+        if not market.has_sufficient_liquidity:
+            return False, "Insufficient liquidity"
+        if self.require_liquidity_data:
+            if market.volume_24h is None and market.liquidity is None:
+                return False, "No liquidity data available"
+        return True, None
+
+    def _calculate_priority(self, market_a: MarketData, market_b: MarketData) -> str:
+        """Calculate opportunity priority based on resolution time."""
+        days_a = market_a.days_to_resolution
+        days_b = market_b.days_to_resolution
+
+        # Use shorter resolution time
+        days = min(d for d in [days_a, days_b] if d is not None) if any([days_a, days_b]) else None
+
+        if days is None:
+            return "MEDIUM"
+        if days <= 7:
+            return "HIGH"  # Quick turnaround
+        if days <= 30:
+            return "MEDIUM"
+        return "LOW"  # Capital locked too long
 
     def calculate_cross_platform(
         self,
@@ -113,6 +175,22 @@ class ArbitrageCalculator:
 
         # Need prices from both markets
         if market_a.yes_price is None or market_b.yes_price is None:
+            return None
+
+        # Check resolution date filter
+        res_ok_a, res_reason_a = self._check_resolution_date(market_a)
+        res_ok_b, res_reason_b = self._check_resolution_date(market_b)
+        if not res_ok_a or not res_ok_b:
+            reason = res_reason_a or res_reason_b
+            self.logger.debug("Filtered by resolution date", reason=reason)
+            return None
+
+        # Check liquidity filter
+        liq_ok_a, liq_reason_a = self._check_liquidity(market_a)
+        liq_ok_b, liq_reason_b = self._check_liquidity(market_b)
+        if not liq_ok_a or not liq_ok_b:
+            reason = liq_reason_a or liq_reason_b
+            self.logger.debug("Filtered by liquidity", reason=reason)
             return None
 
         # Calculate both possible arbitrage directions
@@ -158,6 +236,12 @@ class ArbitrageCalculator:
 
         is_profitable = net_profit_pct >= self.min_net_spread_pct
 
+        # Calculate priority and days to resolution
+        priority = self._calculate_priority(market_a, market_b)
+        days_a = market_a.days_to_resolution
+        days_b = market_b.days_to_resolution
+        days_to_resolution = min(d for d in [days_a, days_b] if d is not None) if any([days_a, days_b]) else None
+
         return ArbitrageResult(
             market_a=market_a,
             market_b=market_b,
@@ -172,6 +256,10 @@ class ArbitrageCalculator:
             net_profit_pct=Decimal(str(net_profit_pct)),
             is_profitable=is_profitable,
             position_size=position_size,
+            priority=priority,
+            days_to_resolution=days_to_resolution,
+            liquidity_a=market_a.volume_24h or market_a.liquidity,
+            liquidity_b=market_b.volume_24h or market_b.liquidity,
         )
 
     def calculate_same_platform_logical(

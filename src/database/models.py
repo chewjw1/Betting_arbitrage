@@ -183,6 +183,44 @@ class Opportunity(Base):
         return f"<Opportunity {self.platform_a}/{self.platform_b} net={self.net_profit_pct}%>"
 
 
+class PriceHistory(Base):
+    """Historical price tracking for analysis.
+
+    Stores every price update to analyze:
+    - How long arbitrage windows stay open
+    - Price movement patterns
+    - Best times to scan
+    """
+
+    __tablename__ = "price_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    platform_market_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    market_title: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Prices
+    yes_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    no_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    yes_bid: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    yes_ask: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+
+    # Volume & Liquidity
+    volume_24h: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
+    total_volume: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
+    open_interest: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
+
+    # Timestamp
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, index=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<PriceHistory {self.platform}:{self.platform_market_id} yes={self.yes_price} @ {self.recorded_at}>"
+
+
 class Notification(Base):
     """Discord notification log."""
 

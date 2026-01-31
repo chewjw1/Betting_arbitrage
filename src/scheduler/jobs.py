@@ -45,6 +45,7 @@ from src.database import (
     Opportunity,
     Price,
 )
+from src.database.price_history import log_all_prices
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -360,8 +361,14 @@ class ArbitrageScanner:
         self,
         markets_by_platform: dict[str, list[MarketData]],
     ) -> None:
-        """Store collected market data in the database."""
+        """Store collected market data in the database and log price history."""
         async with async_session_factory() as session:
+            # Log all prices to history table (for analysis)
+            all_markets = []
+            for markets in markets_by_platform.values():
+                all_markets.extend(markets)
+            history_count = await log_all_prices(session, all_markets)
+            self.logger.debug("Logged price history", count=history_count)
             for platform, markets in markets_by_platform.items():
                 for market_data in markets:
                     try:
