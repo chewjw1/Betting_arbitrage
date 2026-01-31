@@ -1,0 +1,165 @@
+# Prediction Market Arbitrage System
+
+A system for detecting arbitrage opportunities across prediction markets (Kalshi, Polymarket, PredictIt) with Discord notifications and a web dashboard.
+
+## Features
+
+- **Multi-Platform Data Collection**: Fetch market data from Kalshi, Polymarket, and PredictIt
+- **Cross-Platform Arbitrage Detection**: Identify price discrepancies for the same events across platforms
+- **Fee-Aware Calculations**: Account for platform-specific trading fees in profit calculations
+- **Discord Notifications**: Real-time alerts when profitable opportunities are detected
+- **User Response Tracking**: Track which opportunities you acted on vs passed
+- **Web Dashboard**: View all opportunities, filter by status, and analyze performance
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- PostgreSQL 16+
+- Redis 7+
+- Docker & Docker Compose (recommended)
+
+### Setup
+
+1. **Clone and configure**:
+   ```bash
+   cd Betting_arbitrage
+   cp .env.example .env
+   # Edit .env with your API keys and settings
+   ```
+
+2. **Get API Credentials**:
+   - **Kalshi**: Create account at [kalshi.com](https://kalshi.com), generate API key in settings
+   - **Discord**: Create bot at [Discord Developer Portal](https://discord.com/developers/applications)
+
+3. **Start with Docker**:
+   ```bash
+   docker-compose up -d
+   ```
+
+   Or **manual setup**:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+
+   # Start services
+   python -m src.scheduler.jobs  # Data collector
+   python -m src.notifications.discord_bot  # Discord bot
+   python -m src.api.main  # Dashboard API
+   ```
+
+4. **Access the dashboard**: http://localhost:8000/docs
+
+## Configuration
+
+Key environment variables in `.env`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `KALSHI_API_KEY` | Kalshi API key | Required |
+| `KALSHI_PRIVATE_KEY_PATH` | Path to Kalshi RSA private key | `./kalshi_private_key.pem` |
+| `DISCORD_BOT_TOKEN` | Discord bot token | Required for alerts |
+| `DISCORD_CHANNEL_ID` | Channel ID for alerts | Required for alerts |
+| `MIN_NET_SPREAD_PCT` | Minimum net profit % to alert | `1.0` |
+| `MAX_POSITION_SIZE` | Max $ per side | `500` |
+| `POLL_INTERVAL_SECONDS` | Scan frequency | `30` |
+
+## Platform Status
+
+| Platform | API Access | Trading | Notes |
+|----------|-----------|---------|-------|
+| Kalshi | ✅ Full REST/WebSocket/FIX | ✅ Yes | Main platform for US users |
+| Polymarket | ✅ REST API | ⚠️ Complex | US access recently restored, monitor ToS |
+| PredictIt | ✅ Read-only API | ❌ Manual | No trading API, good for price comparison |
+| Robinhood | ❌ No public API | N/A | Uses Kalshi backend |
+
+## Fee Structure
+
+| Platform | Trading Fee | Profit Fee |
+|----------|------------|------------|
+| Kalshi | ~1.2% | ~2% on profits |
+| Polymarket (US) | 0.01% | 0% |
+| PredictIt | 0% | 10% on profits + 5% withdrawal |
+
+## How Arbitrage Works
+
+1. **Same-Event Arbitrage**: When YES on Platform A + NO on Platform B < $1.00
+   - Example: Kalshi YES at $0.45, Polymarket NO at $0.48
+   - Total cost: $0.93 for guaranteed $1.00 return
+   - Gross profit: 7%, minus fees
+
+2. **Logical Arbitrage**: Related bets with inconsistent probabilities
+   - Mutually exclusive outcomes that don't sum to 100%
+   - Temporal inconsistencies (earlier date > later date)
+
+## API Endpoints
+
+- `GET /api/v1/opportunities` - List all opportunities
+- `GET /api/v1/opportunities/{id}` - Get specific opportunity
+- `PATCH /api/v1/opportunities/{id}` - Update (mark as acted/passed)
+- `GET /api/v1/stats` - Dashboard statistics
+- `GET /api/v1/markets` - List tracked markets
+
+## Discord Commands
+
+- `/status` - Check bot status
+- `/threshold [value]` - View/set minimum profit threshold
+- `/test` - Send a test notification
+- `/help` - Show help
+
+React to notifications:
+- ✅ - Mark as acted upon
+- ❌ - Mark as passed
+
+## Project Structure
+
+```
+src/
+├── collectors/     # Platform API clients
+├── matching/       # Market title matching
+├── arbitrage/      # Profit calculations
+├── notifications/  # Discord bot
+├── database/       # SQLAlchemy models
+├── api/           # FastAPI dashboard
+└── scheduler/     # Job scheduling
+```
+
+## Important Warnings
+
+1. **Resolution Risk**: Different platforms may resolve the same event differently. Always verify resolution criteria match before taking a position.
+
+2. **Legal Considerations**: Prediction market legality varies by state. Verify compliance with Georgia regulations.
+
+3. **Capital Lock-up**: Funds may be locked until market resolution (weeks/months).
+
+4. **Not Financial Advice**: This is a tool for identifying opportunities. All trading decisions are your own.
+
+## Development
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Format code
+black src/ tests/
+ruff check src/ tests/
+
+# Type checking
+mypy src/
+```
+
+## Resources
+
+- [Kalshi API Docs](https://docs.kalshi.com/welcome)
+- [Polymarket Docs](https://docs.polymarket.com/)
+- [PredictIt API](https://www.predictit.org/api/marketdata/all/)
+- [EventArb Calculator](https://www.eventarb.com/)
+
+## License
+
+MIT License - See LICENSE file

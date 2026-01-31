@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: betting_arbitrage_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-betting}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-betting_password}
+      POSTGRES_DB: ${POSTGRES_DB:-betting_arbitrage}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betting -d betting_arbitrage"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: betting_arbitrage_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: betting_arbitrage_collector
+    command: python -m src.scheduler.jobs
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://betting:betting_password@db:5432/betting_arbitrage
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  discord_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: betting_arbitrage_discord
+    command: python -m src.notifications.discord_bot
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://betting:betting_password@db:5432/betting_arbitrage
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: betting_arbitrage_api
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://betting:betting_password@db:5432/betting_arbitrage
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
