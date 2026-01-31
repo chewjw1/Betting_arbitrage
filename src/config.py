@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     # PredictIt API
     predictit_api_host: str = Field(default="https://www.predictit.org")
 
+    # DraftKings (scraping)
+    draftkings_base_url: str = Field(default="https://predictions.draftkings.com")
+    apify_api_token: str = Field(default="", description="Apify API token for DraftKings scraping")
+
+    # FanDuel (scraping)
+    fanduel_base_url: str = Field(default="https://www.fanduel.com/predicts")
+
+    # Interactive Brokers
+    ibkr_username: str = Field(default="")
+    ibkr_password: str = Field(default="")
+    ibkr_account_id: str = Field(default="")
+
     # Discord
     discord_bot_token: str = Field(default="")
     discord_channel_id: int = Field(default=0)
@@ -106,6 +118,41 @@ PLATFORM_FEES = {
     },
     "manifold": {
         "trading_fee_pct": 0,
+        "profit_fee_pct": 0,
+        "deposit_fee": 0,
+        "withdrawal_fee": 0,
+    },
+    "draftkings": {
+        # DraftKings uses CME contracts, fees similar to CME
+        "trading_fee_pct": 0.01,  # ~1% estimated
+        "profit_fee_pct": 0,
+        "deposit_fee": 0,
+        "withdrawal_fee": 0,
+    },
+    "fanduel": {
+        # FanDuel Predicts uses CME contracts
+        "trading_fee_pct": 0.01,  # ~1% estimated
+        "profit_fee_pct": 0,
+        "deposit_fee": 0,
+        "withdrawal_fee": 0,
+    },
+    "ibkr": {
+        # IBKR ForecastTrader - zero commission
+        "trading_fee_pct": 0,
+        "profit_fee_pct": 0,
+        "deposit_fee": 0,
+        "withdrawal_fee": 0,
+    },
+    "coinbase": {
+        # Coinbase uses Kalshi contracts - same fee structure
+        "trading_fee_pct": 0.012,
+        "profit_fee_pct": 0.02,
+        "deposit_fee": 0,
+        "withdrawal_fee": 0,
+    },
+    "robinhood": {
+        # Robinhood uses Kalshi contracts - fees included in spread
+        "trading_fee_pct": 0,  # Built into spread
         "profit_fee_pct": 0,
         "deposit_fee": 0,
         "withdrawal_fee": 0,

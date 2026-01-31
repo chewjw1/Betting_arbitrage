@@ -42,6 +42,12 @@ python-Levenshtein>=0.23.0
 # Cryptography (for Kalshi RSA auth)
 cryptography>=41.0.0
 
+# Browser automation (for scraping platforms without APIs)
+playwright>=1.41.0
+
+# Date parsing for logical arbitrage
+python-dateutil>=2.8.0
+
 # Platform-specific clients (optional, can also use direct API)
 # kalshi-python>=2.1.0  # Uncomment if using official client
 
