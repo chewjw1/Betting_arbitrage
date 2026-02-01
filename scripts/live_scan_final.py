@@ -50,41 +50,66 @@ def fetch_predictit() -> list[dict]:
 def fetch_polymarket() -> list[dict]:
     """Fetch Polymarket markets."""
     print("Fetching Polymarket...")
-    try:
-        data = fetch_json("https://clob.polymarket.com/markets", timeout=15)
 
-        markets = []
-        for item in data:
-            # Handle different formats
-            if isinstance(item, str):
-                continue  # Skip string items
-            if not isinstance(item, dict):
-                continue
+    # Try multiple endpoints
+    endpoints = [
+        ("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=500", "gamma"),
+        ("https://clob.polymarket.com/markets", "clob"),
+    ]
 
-            tokens = item.get("tokens", [])
-            question = item.get("question", "")
-            if not tokens or not question:
-                continue
+    for url, api_type in endpoints:
+        try:
+            data = fetch_json(url, timeout=20)
+            markets = []
 
-            if len(tokens) >= 2:
-                try:
-                    yes_price = Decimal(str(tokens[0].get("price", 0)))
-                    if yes_price > 0:
-                        markets.append({
-                            "platform": "polymarket",
-                            "id": item.get("condition_id", ""),
-                            "title": question,
-                            "yes_price": yes_price,
-                            "url": "https://polymarket.com/",
-                        })
-                except (TypeError, ValueError):
+            items = data if isinstance(data, list) else []
+
+            for item in items:
+                if not isinstance(item, dict):
                     continue
 
-        print(f"  {len(markets)} markets")
-        return markets
-    except Exception as e:
-        print(f"  Error: {e}")
-        return []
+                question = item.get("question", "")
+                if not question:
+                    continue
+
+                yes_price = None
+
+                # Gamma API format
+                if api_type == "gamma":
+                    outcome_prices = item.get("outcomePrices")
+                    if outcome_prices:
+                        try:
+                            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                            if prices and len(prices) >= 1:
+                                yes_price = Decimal(str(prices[0]))
+                        except:
+                            pass
+
+                # CLOB format
+                elif api_type == "clob":
+                    tokens = item.get("tokens", [])
+                    if tokens and len(tokens) >= 1:
+                        yes_price = Decimal(str(tokens[0].get("price", 0)))
+
+                if yes_price and yes_price > 0:
+                    markets.append({
+                        "platform": "polymarket",
+                        "id": item.get("condition_id") or item.get("conditionId") or str(hash(question)),
+                        "title": question,
+                        "yes_price": yes_price,
+                        "url": f"https://polymarket.com/event/{item.get('slug', '')}",
+                    })
+
+            if markets:
+                print(f"  {len(markets)} markets (via {api_type})")
+                return markets
+
+        except Exception as e:
+            print(f"  {api_type} API error: {e}")
+            continue
+
+    print("  0 markets (all endpoints failed)")
+    return []
 
 
 def fetch_kalshi() -> list[dict]:
@@ -129,31 +154,69 @@ def get_keywords(text: str) -> set:
     """Get important keywords from text."""
     text = text.lower()
     # Remove common stop words
-    stop = {'will', 'the', 'be', 'in', 'by', 'on', 'a', 'an', 'to', 'of', 'for', 'who', 'what', 'win', 'yes', 'no'}
+    stop = {'will', 'the', 'be', 'in', 'by', 'on', 'a', 'an', 'to', 'of', 'for', 'who', 'what', 'win', 'yes', 'no',
+            'nomination', 'presidential', 'democratic', 'republican', 'election', 'people', 'than', 'less', 'more'}
     words = re.findall(r'\b\w+\b', text)
-    return {w for w in words if w not in stop and len(w) > 2}
+    return {w for w in words if w not in stop and len(w) > 3}
+
+
+def extract_year(text: str) -> str | None:
+    """Extract year from text."""
+    match = re.search(r'\b(202[4-9]|203[0-9])\b', text)
+    return match.group(1) if match else None
+
+
+def extract_event_type(text: str) -> str | None:
+    """Identify event type."""
+    text = text.lower()
+    if any(x in text for x in ['nba', 'nfl', 'mlb', 'nhl', 'super bowl', 'finals', 'world series', 'lakers', 'celtics']):
+        return 'sports'
+    if any(x in text for x in ['senate', 'house', 'governor', 'mayor', 'congress']):
+        return 'state_election'
+    if any(x in text for x in ['presidential', 'president']):
+        return 'presidential'
+    if any(x in text for x in ['bitcoin', 'btc', 'ethereum', 'crypto']):
+        return 'crypto'
+    if any(x in text for x in ['fed', 'interest rate', 'gdp', 'inflation']):
+        return 'economics'
+    return 'other'
 
 
 def find_matches(all_markets: dict) -> list:
-    """Find potential matches between platforms."""
+    """Find potential matches between platforms with STRICT validation."""
     matches = []
     platforms = list(all_markets.keys())
 
     for i, p1 in enumerate(platforms):
         for p2 in platforms[i+1:]:
             for m1 in all_markets[p1]:
-                kw1 = get_keywords(m1["title"])
-                for m2 in all_markets[p2]:
-                    kw2 = get_keywords(m2["title"])
+                title1 = m1["title"]
+                kw1 = get_keywords(title1)
+                year1 = extract_year(title1)
+                type1 = extract_event_type(title1)
 
-                    # Need substantial keyword overlap
-                    common = kw1 & kw2
-                    if len(common) < 3:
+                for m2 in all_markets[p2]:
+                    title2 = m2["title"]
+
+                    # STRICT CHECK 1: Same event type
+                    type2 = extract_event_type(title2)
+                    if type1 != type2:
                         continue
 
-                    # Check title similarity
-                    sim = SequenceMatcher(None, normalize(m1["title"]), normalize(m2["title"])).ratio()
-                    if sim < 0.6:
+                    # STRICT CHECK 2: Same year (if both have years)
+                    year2 = extract_year(title2)
+                    if year1 and year2 and year1 != year2:
+                        continue
+
+                    # STRICT CHECK 3: Substantial keyword overlap
+                    kw2 = get_keywords(title2)
+                    common = kw1 & kw2
+                    if len(common) < 2:
+                        continue
+
+                    # STRICT CHECK 4: High title similarity
+                    sim = SequenceMatcher(None, normalize(title1), normalize(title2)).ratio()
+                    if sim < 0.70:  # Raised from 0.6
                         continue
 
                     # Calculate potential arbitrage
@@ -168,6 +231,8 @@ def find_matches(all_markets: dict) -> list:
                         "common_keywords": common,
                         "similarity": sim,
                         "spread": spread,
+                        "event_type": type1,
+                        "year": year1 or year2,
                     })
 
     return sorted(matches, key=lambda x: (-x["spread"], -x["similarity"]))
