@@ -219,17 +219,73 @@ print(f'Channel ID: {s.discord_channel_id}')
 "
 ```
 
-## Troubleshooting
+## Playwright Setup for Scraping (DraftKings, FanDuel, IBKR)
 
-### Playwright issues on seedbox:
+The scrapers require Playwright with Chromium. These platforms don't need login - they scrape public prices.
+
+### Option 1: Direct Install (if you have sudo access)
+
 ```bash
-# Install system dependencies (if you have sudo)
-sudo apt-get install -y libgbm1 libasound2
+# Install system dependencies
+sudo apt-get update
+sudo apt-get install -y \
+  libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+  libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+  libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+  libpango-1.0-0 libcairo2 libasound2
 
-# Or use headless mode without GPU
-export PLAYWRIGHT_BROWSERS_PATH=~/.cache/ms-playwright
+# Install Playwright and browsers
+pip install playwright
 playwright install chromium
+
+# Test it works
+python scripts/test_scraping.py
 ```
+
+### Option 2: Docker Container
+
+```bash
+# Use the official Playwright Python image
+docker run -it --rm \
+  -v ~/Betting_arbitrage:/app \
+  -w /app \
+  mcr.microsoft.com/playwright/python:v1.40.0-focal \
+  python -m src.scheduler.jobs
+```
+
+Or add a `docker-compose.yml`:
+```yaml
+version: '3.8'
+services:
+  scanner:
+    image: mcr.microsoft.com/playwright/python:v1.40.0-focal
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: python -m src.scheduler.jobs
+    env_file: .env
+    restart: unless-stopped
+```
+
+### Option 3: API-Only Mode (No Scraping)
+
+If Playwright doesn't work, run in API-only mode:
+
+```python
+# In src/scheduler/jobs.py, comment out scraping collectors:
+# collectors = {
+#     "draftkings": DraftKingsCollector(),
+#     "fanduel": FanDuelCollector(),
+#     "ibkr": IBKRCollector(),
+# }
+```
+
+This still gives you:
+- PredictIt (756+ markets)
+- Polymarket (400+ markets)
+- Kalshi (70+ markets)
+
+## Troubleshooting
 
 ### SSL/TLS errors:
 ```bash
