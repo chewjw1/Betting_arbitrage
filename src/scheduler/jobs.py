@@ -48,6 +48,13 @@ from src.database import (
 from src.database.price_history import log_all_prices
 
 logger = structlog.get_logger()
+
+# Try to import dashboard health update (optional, won't fail if API not running)
+try:
+    from src.api.routes.health import update_scan_status
+except ImportError:
+    def update_scan_status(*args, **kwargs):
+        pass  # API not available
 settings = get_settings()
 
 
@@ -335,6 +342,10 @@ class ArbitrageScanner:
                 notifications_sent += 1
 
         scan_time = time.time() - start_time
+
+        # Update dashboard health status
+        total_opps = len(cross_platform_opps) + len(logical_opps)
+        update_scan_status(scan_type, markets_by_platform, total_opps)
 
         self.logger.info(
             "Scan complete",

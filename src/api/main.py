@@ -2,18 +2,23 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 import structlog
 
-from src.api.routes import markets, opportunities, stats
+from src.api.routes import markets, opportunities, stats, health
 from src.api.schemas import HealthResponse
 from src.config import get_settings
 from src.database import init_db
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+# Path to templates
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 @asynccontextmanager
@@ -47,15 +52,26 @@ app.add_middleware(
 app.include_router(opportunities.router, prefix="/api/v1")
 app.include_router(markets.router, prefix="/api/v1")
 app.include_router(stats.router, prefix="/api/v1")
+app.include_router(health.router, prefix="/api/v1")
 
 
-@app.get("/", tags=["root"])
-async def root():
-    """Root endpoint."""
+@app.get("/", response_class=HTMLResponse, tags=["dashboard"])
+async def dashboard():
+    """Serve the dashboard HTML page."""
+    dashboard_path = TEMPLATES_DIR / "dashboard.html"
+    if dashboard_path.exists():
+        return HTMLResponse(content=dashboard_path.read_text())
+    return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
+
+
+@app.get("/api", tags=["root"])
+async def api_root():
+    """API root endpoint."""
     return {
         "name": "Prediction Market Arbitrage API",
         "version": "0.1.0",
         "docs": "/docs",
+        "dashboard": "/",
     }
 
 
