@@ -71,7 +71,7 @@ NOTIFICATION_COOLDOWN_SECONDS=300  # 5 min cooldown
 
 # Dashboard
 API_HOST=0.0.0.0
-API_PORT=8080  # Use a port allowed by ultra.cc
+API_PORT=44495  # Custom port for ultra.cc
 
 # Logging
 LOG_LEVEL=INFO
@@ -173,10 +173,10 @@ pm2 startup
 ```bash
 # In a separate screen/service
 source venv/bin/activate
-uvicorn src.api.main:app --host 0.0.0.0 --port 8080
+uvicorn src.api.main:app --host 0.0.0.0 --port 44495
 ```
 
-Access at: `http://username.ultra.cc:8080/docs`
+Access at: `http://username.ultra.cc:44495/docs`
 
 ## SQLite Setup (instead of PostgreSQL)
 
@@ -307,10 +307,10 @@ free -h
 ### Port already in use:
 ```bash
 # Find what's using the port
-lsof -i :8080
+lsof -i :44495
 
-# Use a different port in .env
-API_PORT=8081
+# Use a different port in .env if needed
+API_PORT=44496
 ```
 
 ## Quick Health Check Script
