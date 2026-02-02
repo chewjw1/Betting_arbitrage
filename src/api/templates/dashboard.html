@@ -18,7 +18,7 @@
             min-height: 100vh;
         }
         .container {
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
         }
         h1 {
@@ -49,6 +49,31 @@
         .status-error { background: #f91880; }
         .status-disabled { background: #71767b; }
         .status-stale { background: #f59e0b; color: #000; }
+
+        /* Opportunity type badges */
+        .type-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .type-cross_platform { background: #1d9bf0; color: #fff; }
+        .type-logical { background: #7c3aed; color: #fff; }
+        .type-cross_platform_logical { background: #059669; color: #fff; }
+
+        /* Subtype badges */
+        .subtype-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 500;
+            background: #2f3336;
+            color: #a0a0a0;
+        }
 
         .grid {
             display: grid;
@@ -118,16 +143,18 @@
         }
         .opportunities-table th {
             text-align: left;
-            padding: 12px;
+            padding: 12px 8px;
             border-bottom: 1px solid #2f3336;
             color: #71767b;
             font-weight: 500;
-            font-size: 13px;
+            font-size: 12px;
+            white-space: nowrap;
         }
         .opportunities-table td {
-            padding: 12px;
+            padding: 12px 8px;
             border-bottom: 1px solid #2f3336;
-            font-size: 14px;
+            font-size: 13px;
+            vertical-align: top;
         }
         .opportunities-table tr:hover {
             background: #1d1f23;
@@ -144,13 +171,69 @@
             padding: 2px 8px;
             background: #1d9bf0;
             border-radius: 4px;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
         }
+        .platform-tag.kalshi { background: #6366f1; }
+        .platform-tag.polymarket { background: #8b5cf6; }
+        .platform-tag.predictit { background: #ec4899; }
+        .platform-tag.draftkings { background: #f59e0b; color: #000; }
+        .platform-tag.fanduel { background: #3b82f6; }
+
         .time-ago {
             color: #71767b;
-            font-size: 12px;
+            font-size: 11px;
+        }
+
+        /* Platform details cell */
+        .platform-details {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .platform-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            background: #1d1f23;
+            border-radius: 6px;
+        }
+        .platform-info {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+        }
+        .platform-price {
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .platform-side {
+            font-size: 10px;
+            color: #71767b;
+            text-transform: uppercase;
+        }
+        .platform-fees {
+            font-size: 10px;
+            color: #f59e0b;
+        }
+
+        /* Fee breakdown tooltip */
+        .fee-breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 10px;
+            color: #71767b;
+            background: #16181c;
+            padding: 6px;
+            border-radius: 4px;
+            margin-top: 4px;
+        }
+        .fee-row {
+            display: flex;
+            justify-content: space-between;
         }
 
         .refresh-btn {
@@ -192,10 +275,42 @@
         }
 
         .market-title {
-            max-width: 300px;
+            max-width: 200px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            font-size: 12px;
+        }
+
+        .market-link {
+            color: #1d9bf0;
+            text-decoration: none;
+        }
+        .market-link:hover {
+            text-decoration: underline;
+        }
+
+        /* Filters */
+        .filters {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .filter-btn {
+            padding: 6px 12px;
+            background: #2f3336;
+            border: none;
+            border-radius: 16px;
+            color: #e7e9ea;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .filter-btn:hover {
+            background: #3f4346;
+        }
+        .filter-btn.active {
+            background: #1d9bf0;
         }
 
         @media (max-width: 768px) {
@@ -206,7 +321,7 @@
                 grid-template-columns: 1fr;
             }
             .opportunities-table {
-                font-size: 12px;
+                font-size: 11px;
             }
             .opportunities-table th, .opportunities-table td {
                 padding: 8px 4px;
@@ -290,16 +405,25 @@
             <div class="card-header">
                 <h2>Recent Opportunities</h2>
             </div>
+
+            <!-- Filters -->
+            <div class="filters">
+                <button class="filter-btn active" data-filter="all" onclick="filterOpportunities('all')">All</button>
+                <button class="filter-btn" data-filter="cross_platform" onclick="filterOpportunities('cross_platform')">Cross-Platform</button>
+                <button class="filter-btn" data-filter="logical" onclick="filterOpportunities('logical')">Logical</button>
+                <button class="filter-btn" data-filter="cross_platform_logical" onclick="filterOpportunities('cross_platform_logical')">Cross-Platform Logical</button>
+            </div>
+
             <div style="overflow-x: auto;">
                 <table class="opportunities-table">
                     <thead>
                         <tr>
                             <th>Time</th>
-                            <th>Platforms</th>
-                            <th>Market A</th>
-                            <th>Market B</th>
+                            <th>Type</th>
+                            <th>Platform A</th>
+                            <th>Platform B</th>
                             <th>Gross %</th>
-                            <th>Fees %</th>
+                            <th>Fees</th>
                             <th>Net %</th>
                             <th>Status</th>
                         </tr>
@@ -314,6 +438,8 @@
 
     <script>
         const API_BASE = window.location.origin;
+        let currentFilter = 'all';
+        let allOpportunities = [];
 
         function timeAgo(date) {
             if (!date) return 'Never';
@@ -330,6 +456,35 @@
         function formatTime(date) {
             if (!date) return '-';
             return new Date(date).toLocaleTimeString();
+        }
+
+        function formatPrice(price) {
+            if (price === null || price === undefined) return '-';
+            return `$${parseFloat(price).toFixed(2)}`;
+        }
+
+        function getTypeClass(type) {
+            if (type === 'cross_platform') return 'type-cross_platform';
+            if (type === 'logical') return 'type-logical';
+            if (type === 'cross_platform_logical') return 'type-cross_platform_logical';
+            return 'type-cross_platform';
+        }
+
+        function getTypeName(type) {
+            if (type === 'cross_platform') return 'Cross-Platform';
+            if (type === 'logical') return 'Logical';
+            if (type === 'cross_platform_logical') return 'X-Plat Logical';
+            return type || 'Unknown';
+        }
+
+        function getPlatformClass(platform) {
+            const p = (platform || '').toLowerCase();
+            if (p === 'kalshi') return 'kalshi';
+            if (p === 'polymarket') return 'polymarket';
+            if (p === 'predictit') return 'predictit';
+            if (p === 'draftkings') return 'draftkings';
+            if (p === 'fanduel') return 'fanduel';
+            return '';
         }
 
         async function fetchHealth() {
@@ -391,51 +546,127 @@
 
         async function fetchOpportunities() {
             try {
-                const response = await fetch(`${API_BASE}/api/v1/opportunities?page_size=20&days=7`);
+                const response = await fetch(`${API_BASE}/api/v1/opportunities?page_size=50&days=7`);
                 const data = await response.json();
 
-                const tbody = document.getElementById('opportunities-table');
-
-                if (!data.items || data.items.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #71767b;">No opportunities found in the last 7 days</td></tr>';
-                    return;
-                }
-
-                tbody.innerHTML = data.items.map(opp => {
-                    const grossPct = parseFloat(opp.gross_spread) * 100;
-                    const feesPct = parseFloat(opp.estimated_fees) * 100;
-                    const netPct = parseFloat(opp.net_profit_pct);
-
-                    return `
-                        <tr>
-                            <td>
-                                <div>${formatTime(opp.detected_at)}</div>
-                                <div class="time-ago">${timeAgo(opp.detected_at)}</div>
-                            </td>
-                            <td>
-                                <span class="platform-tag">${opp.platform_a}</span>
-                                <span style="margin: 0 5px;">vs</span>
-                                <span class="platform-tag">${opp.platform_b}</span>
-                            </td>
-                            <td class="market-title" title="${opp.market_a_title || ''}">${opp.market_a_title || '-'}</td>
-                            <td class="market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || '-'}</td>
-                            <td>${grossPct.toFixed(2)}%</td>
-                            <td>${feesPct.toFixed(2)}%</td>
-                            <td class="${netPct >= 3 ? 'profit-positive' : ''}">${netPct.toFixed(2)}%</td>
-                            <td>
-                                ${opp.user_acted === true ? '<span style="color: #00ba7c;">Acted</span>' :
-                                  opp.user_acted === false ? '<span style="color: #71767b;">Passed</span>' :
-                                  '<span style="color: #f59e0b;">Pending</span>'}
-                            </td>
-                        </tr>
-                    `;
-                }).join('');
+                allOpportunities = data.items || [];
+                renderOpportunities();
 
             } catch (error) {
                 console.error('Failed to fetch opportunities:', error);
                 document.getElementById('opportunities-table').innerHTML =
                     '<tr><td colspan="8" style="text-align: center; color: #f91880;">Failed to load opportunities</td></tr>';
             }
+        }
+
+        function filterOpportunities(filter) {
+            currentFilter = filter;
+
+            // Update active button
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.filter === filter);
+            });
+
+            renderOpportunities();
+        }
+
+        function renderOpportunities() {
+            const tbody = document.getElementById('opportunities-table');
+
+            let filtered = allOpportunities;
+            if (currentFilter !== 'all') {
+                filtered = allOpportunities.filter(opp => opp.opportunity_type === currentFilter);
+            }
+
+            if (!filtered || filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #71767b;">No opportunities found</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(opp => {
+                const grossPct = parseFloat(opp.gross_spread) * 100;
+                const netPct = parseFloat(opp.net_profit_pct);
+                const totalFees = parseFloat(opp.estimated_fees) * 100;
+
+                // Build fee breakdown for platform A
+                let feeDetailsA = '';
+                if (opp.fee_a_total !== null && opp.fee_a_total !== undefined) {
+                    feeDetailsA = `<div class="fee-breakdown">
+                        <div class="fee-row"><span>Entry:</span><span>$${parseFloat(opp.fee_a_entry || 0).toFixed(2)}</span></div>
+                        <div class="fee-row"><span>Profit:</span><span>$${parseFloat(opp.fee_a_profit || 0).toFixed(2)}</span></div>
+                        <div class="fee-row" style="font-weight:600;"><span>Total:</span><span>$${parseFloat(opp.fee_a_total).toFixed(2)}</span></div>
+                    </div>`;
+                }
+
+                // Build fee breakdown for platform B
+                let feeDetailsB = '';
+                if (opp.fee_b_total !== null && opp.fee_b_total !== undefined) {
+                    feeDetailsB = `<div class="fee-breakdown">
+                        <div class="fee-row"><span>Entry:</span><span>$${parseFloat(opp.fee_b_entry || 0).toFixed(2)}</span></div>
+                        <div class="fee-row"><span>Profit:</span><span>$${parseFloat(opp.fee_b_profit || 0).toFixed(2)}</span></div>
+                        <div class="fee-row" style="font-weight:600;"><span>Total:</span><span>$${parseFloat(opp.fee_b_total).toFixed(2)}</span></div>
+                    </div>`;
+                }
+
+                // Subtype display
+                const subtypeDisplay = opp.opportunity_subtype_display || opp.opportunity_subtype || '';
+
+                return `
+                    <tr data-type="${opp.opportunity_type}">
+                        <td>
+                            <div>${formatTime(opp.detected_at)}</div>
+                            <div class="time-ago">${timeAgo(opp.detected_at)}</div>
+                        </td>
+                        <td>
+                            <span class="type-badge ${getTypeClass(opp.opportunity_type)}">${getTypeName(opp.opportunity_type)}</span>
+                            ${subtypeDisplay ? `<br><span class="subtype-badge">${subtypeDisplay}</span>` : ''}
+                        </td>
+                        <td>
+                            <div class="platform-details">
+                                <div class="platform-row">
+                                    <span class="platform-tag ${getPlatformClass(opp.platform_a)}">${opp.platform_a}</span>
+                                    <div class="platform-info">
+                                        <span class="platform-price">${formatPrice(opp.price_a)}</span>
+                                        <span class="platform-side">${opp.side_a}</span>
+                                    </div>
+                                </div>
+                                ${opp.market_a_url ?
+                                    `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="${opp.market_a_title || ''}">${opp.market_a_title || 'View Market'}</a>` :
+                                    `<span class="market-title" title="${opp.market_a_title || ''}">${opp.market_a_title || '-'}</span>`
+                                }
+                                ${feeDetailsA}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="platform-details">
+                                <div class="platform-row">
+                                    <span class="platform-tag ${getPlatformClass(opp.platform_b)}">${opp.platform_b}</span>
+                                    <div class="platform-info">
+                                        <span class="platform-price">${formatPrice(opp.price_b)}</span>
+                                        <span class="platform-side">${opp.side_b}</span>
+                                    </div>
+                                </div>
+                                ${opp.platform_a !== opp.platform_b && opp.market_b_url ?
+                                    `<a href="${opp.market_b_url}" target="_blank" class="market-link market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || 'View Market'}</a>` :
+                                    opp.platform_a !== opp.platform_b ? `<span class="market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || '-'}</span>` : ''
+                                }
+                                ${feeDetailsB}
+                            </div>
+                        </td>
+                        <td>${grossPct.toFixed(2)}%</td>
+                        <td>
+                            <span style="color: #f59e0b;">${totalFees.toFixed(2)}%</span>
+                            <div style="font-size: 10px; color: #71767b;">$${parseFloat(opp.estimated_fees).toFixed(2)}</div>
+                        </td>
+                        <td class="${netPct >= 3 ? 'profit-positive' : ''}">${netPct.toFixed(2)}%</td>
+                        <td>
+                            ${opp.user_acted === true ? '<span style="color: #00ba7c;">Acted</span>' :
+                              opp.user_acted === false ? '<span style="color: #71767b;">Passed</span>' :
+                              '<span style="color: #f59e0b;">Pending</span>'}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
         }
 
         function showError(message) {

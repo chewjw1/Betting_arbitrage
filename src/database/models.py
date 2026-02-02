@@ -129,7 +129,13 @@ class Opportunity(Base):
     )
     opportunity_type: Mapped[str] = mapped_column(
         String(50), default="cross_platform"
-    )  # cross_platform, logical
+    )  # cross_platform, logical, cross_platform_logical
+    opportunity_subtype: Mapped[Optional[str]] = mapped_column(
+        String(50)
+    )  # Detailed subtype (e.g., championship_vs_playoffs, deadline_inconsistency)
+    opportunity_subtype_display: Mapped[Optional[str]] = mapped_column(
+        String(100)
+    )  # Human-readable subtype name
 
     # Platform A details
     platform_a: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -151,6 +157,14 @@ class Opportunity(Base):
     gross_spread: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     estimated_fees: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     net_profit_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+
+    # Per-platform fee breakdowns
+    fee_a_entry: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_a_profit: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_a_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_entry: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_profit: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
 
     # Status
     detected_at: Mapped[datetime] = mapped_column(

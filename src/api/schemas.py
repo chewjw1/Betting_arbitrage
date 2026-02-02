@@ -47,10 +47,22 @@ class PriceResponse(BaseModel):
         from_attributes = True
 
 
+class FeeBreakdownSchema(BaseModel):
+    """Fee breakdown for a single platform."""
+
+    platform: str
+    entry_fee: Decimal
+    profit_fee: Decimal
+    total_fee: Decimal
+    fee_pct: Optional[Decimal] = None
+
+
 class OpportunityBase(BaseModel):
     """Base opportunity schema."""
 
     opportunity_type: str = "cross_platform"
+    opportunity_subtype: Optional[str] = None
+    opportunity_subtype_display: Optional[str] = None
     platform_a: str
     market_a_id: UUID
     side_a: str
@@ -84,6 +96,14 @@ class OpportunityResponse(OpportunityBase):
     market_b_title: Optional[str] = None
     market_a_url: Optional[str] = None
     market_b_url: Optional[str] = None
+
+    # Per-platform fee breakdowns
+    fee_a_entry: Optional[Decimal] = None
+    fee_a_profit: Optional[Decimal] = None
+    fee_a_total: Optional[Decimal] = None
+    fee_b_entry: Optional[Decimal] = None
+    fee_b_profit: Optional[Decimal] = None
+    fee_b_total: Optional[Decimal] = None
 
     class Config:
         from_attributes = True

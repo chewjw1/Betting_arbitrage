@@ -25,6 +25,8 @@ def opportunity_to_response(opp: Opportunity) -> OpportunityResponse:
         id=opp.id,
         matched_market_id=opp.matched_market_id,
         opportunity_type=opp.opportunity_type,
+        opportunity_subtype=getattr(opp, 'opportunity_subtype', None),
+        opportunity_subtype_display=getattr(opp, 'opportunity_subtype_display', None),
         platform_a=opp.platform_a,
         market_a_id=opp.market_a_id,
         side_a=opp.side_a,
@@ -49,6 +51,12 @@ def opportunity_to_response(opp: Opportunity) -> OpportunityResponse:
         market_b_title=opp.market_b.title if opp.market_b else None,
         market_a_url=opp.market_a.url if opp.market_a else None,
         market_b_url=opp.market_b.url if opp.market_b else None,
+        fee_a_entry=getattr(opp, 'fee_a_entry', None),
+        fee_a_profit=getattr(opp, 'fee_a_profit', None),
+        fee_a_total=getattr(opp, 'fee_a_total', None),
+        fee_b_entry=getattr(opp, 'fee_b_entry', None),
+        fee_b_profit=getattr(opp, 'fee_b_profit', None),
+        fee_b_total=getattr(opp, 'fee_b_total', None),
     )
 
 
