@@ -182,6 +182,66 @@ def extract_event_type(text: str) -> str | None:
     return 'other'
 
 
+def extract_outcome_polarity(text: str) -> str | None:
+    """Extract the outcome/side being bet on.
+
+    Returns a normalized indicator of which 'side' this market is betting on.
+    Used to avoid matching OPPOSITE outcomes as same-market arbitrage.
+    """
+    text = text.lower()
+
+    # Party affiliations - these are OPPOSITE outcomes
+    if 'republican' in text and 'democratic' not in text:
+        return 'republican'
+    if 'democratic' in text and 'republican' not in text:
+        return 'democratic'
+    if 'democrat ' in text and 'republican' not in text:
+        return 'democratic'
+
+    # Extract specific person/entity names for comparison
+    # If title mentions a specific person, use that as the polarity
+    person_patterns = [
+        r'will\s+([a-z]+\s+[a-z]+)\s+win',  # "Will John Smith win"
+        r':\s*([a-z]+\s+[a-z]+)\s*$',  # "Question: John Smith"
+        r'([a-z]+\s+[a-z]+)\s+win',  # "John Smith win"
+    ]
+
+    for pattern in person_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def are_opposite_outcomes(title1: str, title2: str) -> bool:
+    """Check if two market titles represent OPPOSITE outcomes.
+
+    E.g., "Republican control Senate" vs "Democratic control Senate"
+    These should NOT be matched as arbitrage opportunities.
+    """
+    pol1 = extract_outcome_polarity(title1)
+    pol2 = extract_outcome_polarity(title2)
+
+    # If we can identify polarities and they differ, these are opposites
+    if pol1 and pol2:
+        # Republican vs Democratic
+        if pol1 == 'republican' and pol2 == 'democratic':
+            return True
+        if pol1 == 'democratic' and pol2 == 'republican':
+            return True
+
+        # Different specific people/entities
+        if pol1 != pol2 and len(pol1) > 3 and len(pol2) > 3:
+            # Check if they share any words (might be same person)
+            words1 = set(pol1.split())
+            words2 = set(pol2.split())
+            if not words1 & words2:
+                return True
+
+    return False
+
+
 def find_matches(all_markets: dict) -> list:
     """Find potential matches between platforms with STRICT validation."""
     matches = []
@@ -214,7 +274,12 @@ def find_matches(all_markets: dict) -> list:
                     if len(common) < 2:
                         continue
 
-                    # STRICT CHECK 4: High title similarity
+                    # STRICT CHECK 4: NOT opposite outcomes
+                    # E.g., "Republican control" vs "Democratic control" are NOT same market
+                    if are_opposite_outcomes(title1, title2):
+                        continue
+
+                    # STRICT CHECK 5: High title similarity
                     sim = SequenceMatcher(None, normalize(title1), normalize(title2)).ratio()
                     if sim < 0.70:  # Raised from 0.6
                         continue

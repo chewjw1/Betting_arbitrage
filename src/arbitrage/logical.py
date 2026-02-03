@@ -123,10 +123,21 @@ class LogicalArbitrageDetector:
             by_platform.setdefault(m.platform, []).append(m)
 
         # Check for complement violations within each platform
+        # IMPORTANT: Skip PredictIt - their YES+NO often > 1.0 due to bid-ask spread
+        # and you can't short to exploit it (also 15%+ fees make it unprofitable)
         for platform, platform_markets in by_platform.items():
+            # Skip PredictIt complement checks entirely
+            if platform.lower() == "predictit":
+                continue
+
             for market in platform_markets:
                 if market.yes_price and market.no_price:
-                    # Create self-relationship for complement check
+                    # Only check if sum < 1 (can buy both to lock in profit)
+                    # Skip if sum >= 1 (would need to short, which most platforms don't allow)
+                    total = market.yes_price + market.no_price
+                    if total >= Decimal("1"):
+                        continue
+
                     rel = LogicalRelationship(
                         market_a=market,
                         market_b=market,
