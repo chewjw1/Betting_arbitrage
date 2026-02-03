@@ -444,9 +444,17 @@
         function timeAgo(date) {
             if (!date) return 'Never';
             const now = new Date();
-            const then = new Date(date);
+            // Ensure UTC interpretation - append Z if no timezone info
+            let dateStr = String(date);
+            if (!dateStr.endsWith('Z') && !dateStr.includes('+') && !dateStr.includes('T')) {
+                dateStr = dateStr + 'Z';
+            } else if (dateStr.includes('T') && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+                dateStr = dateStr + 'Z';
+            }
+            const then = new Date(dateStr);
             const seconds = Math.floor((now - then) / 1000);
 
+            if (seconds < 0) return 'Just now';
             if (seconds < 60) return `${seconds}s ago`;
             if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
             if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;

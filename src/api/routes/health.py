@@ -77,14 +77,20 @@ async def get_scan_status_from_db(session: AsyncSession) -> ScanStatus:
     api_platforms = ["kalshi", "polymarket", "predictit"]
     scrape_platforms = ["draftkings", "fanduel", "ibkr"]
 
-    # Get most recent price timestamp per platform to determine last scan time
+    # Only count markets that had a price update in the last 10 minutes
+    recent_cutoff = datetime.utcnow() - timedelta(minutes=10)
+
     for platform_list, is_api in [(api_platforms, True), (scrape_platforms, False)]:
-        # Count markets updated recently
-        query = (
-            select(func.count(func.distinct(Market.id)))
-            .where(Market.platform.in_(platform_list))
+        # Count markets with recent price updates (= active in last scan)
+        count_query = (
+            select(func.count(func.distinct(Price.market_id)))
+            .join(Market, Price.market_id == Market.id)
+            .where(
+                Market.platform.in_(platform_list),
+                Price.timestamp >= recent_cutoff,
+            )
         )
-        result = await session.execute(query)
+        result = await session.execute(count_query)
         count = result.scalar() or 0
 
         # Get last price update time for these platforms
