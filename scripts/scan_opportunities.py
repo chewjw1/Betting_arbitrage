@@ -39,7 +39,7 @@ async def scan_predictit_logical():
             print(f"\n{i}. {opp.subtype_display or 'Unknown'}")
             print(f"   Market: {rel.market_a.title[:60]}...")
             print(f"   Gross: {opp.profit_opportunity_pct:.2f}%")
-            print(f"   Fees:  {float(opp.estimated_fees):.2f} ({opp.net_profit_pct - opp.profit_opportunity_pct + float(opp.estimated_fees):.2f}%)")
+            print(f"   Fees:  {float(opp.estimated_fees):.2f} ({float(opp.net_profit_pct) - float(opp.profit_opportunity_pct) + float(opp.estimated_fees):.2f}%)")
             print(f"   Net:   {opp.net_profit_pct:.2f}%")
             if opp.recommended_action:
                 print(f"   Action: {opp.recommended_action}")
