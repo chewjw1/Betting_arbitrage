@@ -139,17 +139,33 @@ class LogicalArbitrageDetector:
     """Detect arbitrage from logical inconsistencies in prediction markets."""
 
     # Patterns for extracting temporal information
+    # NOTE: Only include patterns that represent actual DEADLINES that can differ
+    # for the same underlying event. "2026 election" is NOT a deadline variant -
+    # 2026 and 2028 elections are completely different events.
     TEMPORAL_PATTERNS = [
         (r"by (\w+ \d{1,2},? \d{4})", "by_date_full"),
         (r"by (\w+ \d{1,2})", "by_date"),
         (r"before (\w+ \d{1,2},? \d{4})", "before_date_full"),
         (r"before (\w+ \d{1,2})", "before_date"),
-        (r"in (\w+) (\d{4})", "in_month"),
         (r"by end of (\d{4})", "by_year_end"),
         (r"by (Q[1-4]) (\d{4})", "by_quarter"),
         (r"by (january|february|march|april|may|june|july|august|september|october|november|december) (\d{4})", "by_month_year"),
-        (r"(\d{4}) (election|season|year)", "year_event"),
+        # Removed: (r"in (\w+) (\d{4})", "in_month") - too broad, matches "in 2026"
+        # Removed: (r"(\d{4}) (election|season|year)", "year_event") - different years are different events
     ]
+
+    # Words that indicate mutually exclusive outcomes (not temporal variants)
+    EXCLUSIVE_OUTCOME_WORDS = {
+        # Parties
+        "republican", "republicans", "democrat", "democrats", "democratic",
+        "libertarian", "green", "independent",
+        # Yes/No variants
+        "yes", "no", "pass", "fail", "passes", "fails",
+        # Candidates (will need to expand)
+        "trump", "biden", "harris", "desantis", "haley", "newsom", "pence",
+        # Other mutually exclusive
+        "over", "under", "above", "below", "higher", "lower",
+    }
 
     # Extended subset relationship patterns
     SUBSET_PATTERNS = [
@@ -456,6 +472,11 @@ class LogicalArbitrageDetector:
                 if market_a.platform != market_b.platform:
                     continue
 
+                # Times must be different (at least 7 days apart)
+                time_diff = abs((time_a - time_b).days)
+                if time_diff < 7:
+                    continue
+
                 # Check if same underlying event
                 if self._same_underlying_event(market_a.title, market_b.title):
                     # Determine which is earlier
@@ -509,9 +530,29 @@ class LogicalArbitrageDetector:
     def _same_underlying_event(self, title_a: str, title_b: str) -> bool:
         """Check if two titles refer to the same underlying event.
 
+        For temporal arbitrage, we need:
+        1. Same underlying event (e.g., "Bitcoin hits 100k")
+        2. Different deadlines (e.g., "by March" vs "by June")
+        3. NOT mutually exclusive outcomes (e.g., Republican vs Democrat)
+
         Returns:
             True if likely same event with different timeframes.
         """
+        title_a_lower = title_a.lower()
+        title_b_lower = title_b.lower()
+
+        # Check for mutually exclusive outcomes - these are NOT temporal variants
+        exclusive_in_a = {w for w in self.EXCLUSIVE_OUTCOME_WORDS if w in title_a_lower}
+        exclusive_in_b = {w for w in self.EXCLUSIVE_OUTCOME_WORDS if w in title_b_lower}
+
+        # If one has "republican" and other has "democrat", they're exclusive outcomes
+        if exclusive_in_a and exclusive_in_b and exclusive_in_a != exclusive_in_b:
+            return False
+
+        # If one has an exclusive word and the other doesn't, they're different
+        if bool(exclusive_in_a) != bool(exclusive_in_b):
+            return False
+
         # Remove temporal info and compare
         def remove_temporal(s: str) -> str:
             s = s.lower()
@@ -519,8 +560,12 @@ class LogicalArbitrageDetector:
                 s = re.sub(pattern, "", s)
             return re.sub(r"\s+", " ", s).strip()
 
-        cleaned_a = remove_temporal(title_a)
-        cleaned_b = remove_temporal(title_b)
+        cleaned_a = remove_temporal(title_a_lower)
+        cleaned_b = remove_temporal(title_b_lower)
+
+        # If titles are identical after removing temporal info, they're definitely different deadlines
+        if cleaned_a == cleaned_b:
+            return True
 
         # Simple similarity check
         words_a = set(cleaned_a.split())
@@ -530,7 +575,9 @@ class LogicalArbitrageDetector:
             return False
 
         overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
-        return overlap > 0.7
+
+        # Require higher overlap (85%) and ensure there's actually a temporal difference
+        return overlap > 0.85
 
     def _find_subset_relationships(
         self,
