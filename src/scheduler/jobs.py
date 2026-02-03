@@ -154,6 +154,7 @@ class ArbitrageScanner:
         self.discord_bot = discord_bot
         self.min_net_spread_pct = min_net_spread_pct or settings.min_net_spread_pct
         self.logger = logger.bind(component="ArbitrageScanner")
+        self._scan_count = 0  # Track scans for periodic price history logging
 
         # Deduplicator for notifications
         self.deduplicator = NotificationDeduplicator(
@@ -372,17 +373,35 @@ class ArbitrageScanner:
         self,
         markets_by_platform: dict[str, list[MarketData]],
     ) -> None:
-        """Store collected market data in the database and log price history."""
+        """Store collected market data in the database.
+
+        Price history is only logged every 5th scan (~5 min) to avoid
+        overwhelming SQLite with 25k+ inserts every 60 seconds.
+        """
+        self._scan_count += 1
+        log_history = (self._scan_count % 5 == 0)  # Every 5th scan
+
         async with async_session_factory() as session:
-            # Log all prices to history table (for analysis)
-            all_markets = []
-            for markets in markets_by_platform.values():
-                all_markets.extend(markets)
-            history_count = await log_all_prices(session, all_markets)
-            self.logger.debug("Logged price history", count=history_count)
+            # Only log price history periodically (every ~5 minutes)
+            if log_history:
+                all_markets = []
+                for markets in markets_by_platform.values():
+                    all_markets.extend(markets)
+                history_count = await log_all_prices(session, all_markets)
+                self.logger.info("Logged price history", count=history_count)
+
+            # Store/update markets and latest prices
             for platform, markets in markets_by_platform.items():
                 for market_data in markets:
                     try:
+                        # Ensure prices are Decimal, not float
+                        yes_price = market_data.yes_price
+                        no_price = market_data.no_price
+                        if isinstance(yes_price, float):
+                            yes_price = Decimal(str(yes_price))
+                        if isinstance(no_price, float):
+                            no_price = Decimal(str(no_price))
+
                         query = select(Market).where(
                             Market.platform == market_data.platform,
                             Market.platform_market_id == market_data.platform_market_id,
@@ -412,11 +431,11 @@ class ArbitrageScanner:
                             session.add(market)
                             await session.flush()
 
-                        if market_data.yes_price is not None:
+                        if yes_price is not None:
                             price = Price(
                                 market_id=market.id,
-                                yes_price=market_data.yes_price,
-                                no_price=market_data.no_price,
+                                yes_price=yes_price,
+                                no_price=no_price,
                                 yes_volume=market_data.yes_volume,
                                 no_volume=market_data.no_volume,
                                 bid_yes=market_data.yes_bid,
