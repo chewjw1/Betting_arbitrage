@@ -72,9 +72,16 @@ class PolymarketCollector(BaseCollector):
         # Fall back to outcomePrices if available
         if yes_price is None and data.get("outcomePrices"):
             prices = data["outcomePrices"]
-            if len(prices) >= 1:
+            # outcomePrices might be a JSON string or a list
+            if isinstance(prices, str):
+                import json
+                try:
+                    prices = json.loads(prices)
+                except (json.JSONDecodeError, TypeError):
+                    prices = []
+            if isinstance(prices, list) and len(prices) >= 1:
                 yes_price = Decimal(str(prices[0]))
-            if len(prices) >= 2:
+            if isinstance(prices, list) and len(prices) >= 2:
                 no_price = Decimal(str(prices[1]))
 
         # Parse end date
@@ -156,12 +163,22 @@ class PolymarketCollector(BaseCollector):
                 break
 
             for market in data:
+                # Skip if market is a string (just a condition ID) instead of a dict
+                if isinstance(market, str):
+                    continue
+                if not isinstance(market, dict):
+                    continue
+
                 try:
-                    markets.append(self._parse_gamma_market(market))
+                    parsed = self._parse_gamma_market(market)
+                    # Only add markets with valid prices
+                    if parsed.yes_price is not None and parsed.yes_price > 0:
+                        markets.append(parsed)
                 except Exception as e:
+                    market_id = market.get("conditionId", "unknown") if isinstance(market, dict) else str(market)[:20]
                     self.logger.warning(
                         "Failed to parse market",
-                        market_id=market.get("conditionId"),
+                        market_id=market_id,
                         error=str(e),
                     )
 
