@@ -681,17 +681,27 @@ class LogicalArbitrageDetector:
         position_size: Decimal,
         expected_profit: Decimal,
     ) -> FeeBreakdown:
-        """Calculate detailed fee breakdown for a position."""
+        """Calculate detailed fee breakdown for a position.
+
+        IMPORTANT: Includes withdrawal fees (PredictIt has 5% on ALL withdrawals).
+        For complement/exhaustive trades, you withdraw position + profit.
+        """
         entry_fee = self.fee_calculator.calculate_entry_fee(platform, position_size)
         profit_fee = self.fee_calculator.calculate_profit_fee(platform, expected_profit)
-        total_fee = entry_fee + profit_fee
+
+        # Withdrawal fee - applied to total amount withdrawn (position + profit)
+        # For PredictIt this is 5% on EVERYTHING you take out
+        withdrawal_amount = position_size + expected_profit
+        withdrawal_fee = self.fee_calculator.calculate_withdrawal_fee(platform, withdrawal_amount)
+
+        total_fee = entry_fee + profit_fee + withdrawal_fee
         fee_pct = (total_fee / position_size) * 100 if position_size else Decimal("0")
 
         return FeeBreakdown(
             platform=platform,
             position_size=position_size,
             entry_fee=entry_fee,
-            profit_fee=profit_fee,
+            profit_fee=profit_fee + withdrawal_fee,  # Combine for display
             total_fee=total_fee,
             fee_pct=fee_pct,
         )
