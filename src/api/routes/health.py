@@ -4,12 +4,16 @@ import asyncio
 import ssl
 import urllib.request
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
+
+from src.database import Market, Opportunity, Price, get_async_session
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/health", tags=["health"])
@@ -18,7 +22,7 @@ router = APIRouter(prefix="/health", tags=["health"])
 class DataSourceStatus(BaseModel):
     """Status of a single data source."""
     name: str
-    status: str  # ok, error, disabled
+    status: str  # ok, error, disabled, stale
     last_check: datetime
     markets_count: Optional[int] = None
     response_time_ms: Optional[int] = None
@@ -42,7 +46,7 @@ class HealthStatusResponse(BaseModel):
     scan_status: ScanStatus
 
 
-# Store last scan info (updated by scheduler)
+# Keep in-memory status for scheduler updates (same-process only)
 _scan_status = ScanStatus()
 
 
@@ -51,7 +55,7 @@ def update_scan_status(
     markets_by_platform: dict,
     opportunities_found: int
 ):
-    """Called by scheduler to update scan status."""
+    """Called by scheduler to update scan status (in-memory, same process only)."""
     global _scan_status
 
     total_markets = sum(len(m) for m in markets_by_platform.values())
@@ -64,6 +68,50 @@ def update_scan_status(
         _scan_status.scrape_markets_count = total_markets
 
     _scan_status.opportunities_found = opportunities_found
+
+
+async def get_scan_status_from_db(session: AsyncSession) -> ScanStatus:
+    """Derive scan status from the database (works across processes)."""
+    scan_status = ScanStatus()
+
+    api_platforms = ["kalshi", "polymarket", "predictit"]
+    scrape_platforms = ["draftkings", "fanduel", "ibkr"]
+
+    # Get most recent price timestamp per platform to determine last scan time
+    for platform_list, is_api in [(api_platforms, True), (scrape_platforms, False)]:
+        # Count markets updated recently
+        query = (
+            select(func.count(func.distinct(Market.id)))
+            .where(Market.platform.in_(platform_list))
+        )
+        result = await session.execute(query)
+        count = result.scalar() or 0
+
+        # Get last price update time for these platforms
+        last_price_query = (
+            select(func.max(Price.timestamp))
+            .join(Market, Price.market_id == Market.id)
+            .where(Market.platform.in_(platform_list))
+        )
+        last_price_result = await session.execute(last_price_query)
+        last_price_time = last_price_result.scalar()
+
+        if is_api:
+            scan_status.api_markets_count = count
+            scan_status.last_api_scan = last_price_time
+        else:
+            scan_status.scrape_markets_count = count
+            scan_status.last_scrape_scan = last_price_time
+
+    # Count recent opportunities (last 24h)
+    opp_query = (
+        select(func.count(Opportunity.id))
+        .where(Opportunity.detected_at >= datetime.utcnow() - timedelta(hours=24))
+    )
+    opp_result = await session.execute(opp_query)
+    scan_status.opportunities_found = opp_result.scalar() or 0
+
+    return scan_status
 
 
 async def check_predictit() -> DataSourceStatus:
@@ -183,39 +231,61 @@ async def check_kalshi() -> DataSourceStatus:
         )
 
 
-def check_scraper_status(name: str) -> DataSourceStatus:
-    """Check scraper status (based on last scan, not live check)."""
-    # Scrapers are checked based on last successful scan, not live
-    # because live checks would be too slow
-    global _scan_status
+async def check_scraper_status_from_db(
+    name: str,
+    session: AsyncSession,
+) -> DataSourceStatus:
+    """Check scraper status from the database."""
+    # Check if we have any markets from this platform
+    count_query = (
+        select(func.count(Market.id))
+        .where(Market.platform == name)
+    )
+    result = await session.execute(count_query)
+    market_count = result.scalar() or 0
 
-    if _scan_status.last_scrape_scan is None:
+    # Check last price update
+    last_update_query = (
+        select(func.max(Price.timestamp))
+        .join(Market, Price.market_id == Market.id)
+        .where(Market.platform == name)
+    )
+    last_result = await session.execute(last_update_query)
+    last_update = last_result.scalar()
+
+    if market_count == 0 and last_update is None:
         return DataSourceStatus(
             name=name,
             status="disabled",
             last_check=datetime.utcnow(),
-            error="No scrape scan recorded yet",
+            markets_count=0,
+            error="No data collected (requires Playwright browser)",
         )
 
-    # If last scrape was more than 10 minutes ago, mark as stale
-    age = (datetime.utcnow() - _scan_status.last_scrape_scan).total_seconds()
-    if age > 600:  # 10 minutes
-        return DataSourceStatus(
-            name=name,
-            status="stale",
-            last_check=_scan_status.last_scrape_scan,
-            error=f"Last scan {int(age/60)} minutes ago",
-        )
+    # If last update was more than 10 minutes ago, mark as stale
+    if last_update:
+        age = (datetime.utcnow() - last_update).total_seconds()
+        if age > 600:
+            return DataSourceStatus(
+                name=name,
+                status="stale",
+                last_check=last_update,
+                markets_count=market_count,
+                error=f"Last update {int(age/60)} minutes ago",
+            )
 
     return DataSourceStatus(
         name=name,
         status="ok",
-        last_check=_scan_status.last_scrape_scan,
+        last_check=last_update or datetime.utcnow(),
+        markets_count=market_count,
     )
 
 
 @router.get("/status", response_model=HealthStatusResponse)
-async def get_health_status():
+async def get_health_status(
+    session: AsyncSession = Depends(get_async_session),
+):
     """Get detailed health status of all data sources."""
 
     # Check API sources in parallel
@@ -238,18 +308,25 @@ async def get_health_status():
         else:
             data_sources.append(check)
 
-    # Add scraper status (not live checked)
+    # Add scraper status from database
     for scraper in ["draftkings", "fanduel", "ibkr"]:
-        data_sources.append(check_scraper_status(scraper))
+        scraper_status = await check_scraper_status_from_db(scraper, session)
+        data_sources.append(scraper_status)
+
+    # Get scan status from database
+    scan_status = await get_scan_status_from_db(session)
 
     # Determine overall status
     ok_count = sum(1 for ds in data_sources if ds.status == "ok")
     error_count = sum(1 for ds in data_sources if ds.status == "error")
+    disabled_count = sum(1 for ds in data_sources if ds.status == "disabled")
 
-    if error_count == 0:
-        overall = "healthy"
-    elif ok_count >= 2:
-        overall = "degraded"
+    # Don't count disabled scrapers against health
+    active_sources = len(data_sources) - disabled_count
+    if active_sources == 0:
+        overall = "unhealthy"
+    elif error_count == 0 or ok_count >= 2:
+        overall = "healthy" if error_count == 0 else "degraded"
     else:
         overall = "unhealthy"
 
@@ -257,20 +334,22 @@ async def get_health_status():
         timestamp=datetime.utcnow(),
         overall_status=overall,
         data_sources=data_sources,
-        scan_status=_scan_status,
+        scan_status=scan_status,
     )
 
 
 @router.get("/sources")
-async def get_sources_quick():
-    """Quick check of data sources (cached, fast)."""
-    global _scan_status
+async def get_sources_quick(
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Quick check of data sources from database."""
+    scan_status = await get_scan_status_from_db(session)
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
-        "last_api_scan": _scan_status.last_api_scan.isoformat() if _scan_status.last_api_scan else None,
-        "last_scrape_scan": _scan_status.last_scrape_scan.isoformat() if _scan_status.last_scrape_scan else None,
-        "api_markets": _scan_status.api_markets_count,
-        "scrape_markets": _scan_status.scrape_markets_count,
-        "opportunities_found": _scan_status.opportunities_found,
+        "last_api_scan": scan_status.last_api_scan.isoformat() if scan_status.last_api_scan else None,
+        "last_scrape_scan": scan_status.last_scrape_scan.isoformat() if scan_status.last_scrape_scan else None,
+        "api_markets": scan_status.api_markets_count,
+        "scrape_markets": scan_status.scrape_markets_count,
+        "opportunities_found": scan_status.opportunities_found,
     }
