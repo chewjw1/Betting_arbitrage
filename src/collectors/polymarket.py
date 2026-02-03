@@ -59,13 +59,17 @@ class PolymarketCollector(BaseCollector):
         no_price = None
 
         outcomes = data.get("outcomes", [])
-        if len(outcomes) >= 2:
+        if isinstance(outcomes, list) and len(outcomes) >= 2:
             # Polymarket uses outcome prices as decimals
             for outcome in outcomes:
-                if outcome.get("outcome", "").lower() == "yes":
+                # Skip if outcome is not a dict
+                if not isinstance(outcome, dict):
+                    continue
+                outcome_name = outcome.get("outcome", "").lower()
+                if outcome_name == "yes":
                     if outcome.get("price"):
                         yes_price = Decimal(str(outcome["price"]))
-                elif outcome.get("outcome", "").lower() == "no":
+                elif outcome_name == "no":
                     if outcome.get("price"):
                         no_price = Decimal(str(outcome["price"]))
 
