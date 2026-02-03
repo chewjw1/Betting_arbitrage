@@ -131,6 +131,9 @@ class FeeCalculator:
 
         For arbitrage, we enter on both platforms but only win on one.
 
+        IMPORTANT: Includes withdrawal fees (especially for PredictIt's 5% fee)
+        which are applied when you withdraw your winnings.
+
         Args:
             platform_a: First platform.
             platform_b: Second platform.
@@ -149,7 +152,19 @@ class FeeCalculator:
         profit_fee_a = self.calculate_profit_fee(platform_a, gross_profit / 2)
         profit_fee_b = self.calculate_profit_fee(platform_b, gross_profit / 2)
 
-        total_fees = entry_fee_a + entry_fee_b + profit_fee_a + profit_fee_b
+        # Withdrawal fees - applied when withdrawing funds
+        # For PredictIt this is 5% on ALL withdrawn funds (position + profit)
+        # For arbitrage, you'll withdraw from the winning platform
+        # Conservative estimate: assume you withdraw position + profit from each
+        withdrawal_amount_a = position_size + (gross_profit / 2)
+        withdrawal_amount_b = position_size + (gross_profit / 2)
+        withdrawal_fee_a = self.calculate_withdrawal_fee(platform_a, withdrawal_amount_a)
+        withdrawal_fee_b = self.calculate_withdrawal_fee(platform_b, withdrawal_amount_b)
+
+        # Average withdrawal fee (since only one side wins)
+        avg_withdrawal_fee = (withdrawal_fee_a + withdrawal_fee_b) / 2
+
+        total_fees = entry_fee_a + entry_fee_b + profit_fee_a + profit_fee_b + avg_withdrawal_fee
         net_profit = gross_profit - total_fees
 
         return {
@@ -157,6 +172,9 @@ class FeeCalculator:
             "entry_fee_b": entry_fee_b,
             "profit_fee_a": profit_fee_a,
             "profit_fee_b": profit_fee_b,
+            "withdrawal_fee_a": withdrawal_fee_a,
+            "withdrawal_fee_b": withdrawal_fee_b,
+            "avg_withdrawal_fee": avg_withdrawal_fee,
             "total_fees": total_fees,
             "gross_profit": gross_profit,
             "net_profit": net_profit,
