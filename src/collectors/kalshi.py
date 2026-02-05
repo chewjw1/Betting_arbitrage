@@ -152,15 +152,16 @@ class KalshiCollector(BaseCollector):
             total_volume=Decimal(str(data["volume"])) if data.get("volume") else None,
         )
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-    )
-    async def fetch_markets(self, category: Optional[str] = None) -> list[MarketData]:
-        """Fetch all available markets from Kalshi.
+    async def fetch_markets(
+        self,
+        category: Optional[str] = None,
+        max_markets: int = 1000,
+    ) -> list[MarketData]:
+        """Fetch available markets from Kalshi.
 
         Args:
             category: Optional category filter (e.g., 'Politics', 'Economics').
+            max_markets: Maximum markets to fetch (default 1000).
 
         Returns:
             List of MarketData objects.
@@ -171,15 +172,28 @@ class KalshiCollector(BaseCollector):
         markets = []
         cursor = None
 
-        while True:
+        while len(markets) < max_markets:
             params = {"limit": 100, "status": "open"}
             if category:
                 params["category"] = category
             if cursor:
                 params["cursor"] = cursor
 
-            response = await self.client.get("/trade-api/v2/markets", params=params)
-            response.raise_for_status()
+            try:
+                response = await self.client.get("/trade-api/v2/markets", params=params)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                self.logger.warning(
+                    "Kalshi API error",
+                    status_code=e.response.status_code,
+                    page=len(markets) // 100 + 1,
+                    markets_so_far=len(markets),
+                )
+                # Return what we have so far instead of failing completely
+                if markets:
+                    break
+                raise
+
             data = response.json()
 
             for market in data.get("markets", []):
@@ -195,6 +209,10 @@ class KalshiCollector(BaseCollector):
             cursor = data.get("cursor")
             if not cursor:
                 break
+
+            # Small delay between pages to avoid rate limiting
+            import asyncio
+            await asyncio.sleep(0.3)
 
         self.logger.info("Fetched markets from Kalshi", count=len(markets))
         return markets
