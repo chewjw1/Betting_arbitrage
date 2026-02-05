@@ -105,6 +105,15 @@ class PolymarketCollector(BaseCollector):
         elif data.get("resolved"):
             status = "resolved"
 
+        # Construct URL - slug is the URL-friendly identifier
+        # conditionId is a hex string that won't work in URLs
+        slug = data.get("slug")
+        if slug:
+            url = f"https://polymarket.com/event/{slug}"
+        else:
+            # Fall back to searching by title on Polymarket
+            url = "https://polymarket.com"
+
         return MarketData(
             platform=self.platform_name,
             platform_market_id=data.get("conditionId", data.get("id", "")),
@@ -114,7 +123,7 @@ class PolymarketCollector(BaseCollector):
             category=data.get("category"),
             end_date=end_date,
             status=status,
-            url=f"https://polymarket.com/event/{data.get('slug', data.get('conditionId', ''))}",
+            url=url,
             yes_price=yes_price,
             no_price=no_price,
             total_volume=Decimal(str(data["volume"])) if data.get("volume") else None,

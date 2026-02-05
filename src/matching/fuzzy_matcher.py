@@ -1,6 +1,7 @@
 """Fuzzy string matching for market titles."""
 
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
@@ -9,6 +10,31 @@ from fuzzywuzzy import fuzz
 from src.collectors.base import MarketData
 
 logger = structlog.get_logger()
+
+
+def _dates_compatible(date_a: Optional[datetime], date_b: Optional[datetime], max_days_diff: int = 14) -> bool:
+    """Check if two resolution dates are close enough to be the same event.
+
+    Args:
+        date_a: First date (can be None).
+        date_b: Second date (can be None).
+        max_days_diff: Maximum allowed difference in days.
+
+    Returns:
+        True if dates are compatible (both None, or within max_days_diff).
+    """
+    # If either is missing, we can't validate - assume compatible
+    if date_a is None or date_b is None:
+        return True
+
+    # Normalize timezones
+    if date_a.tzinfo is None:
+        date_a = date_a.replace(tzinfo=timezone.utc)
+    if date_b.tzinfo is None:
+        date_b = date_b.replace(tzinfo=timezone.utc)
+
+    diff = abs((date_a - date_b).days)
+    return diff <= max_days_diff
 
 
 class MarketMatcher:
@@ -141,6 +167,7 @@ class MarketMatcher:
         markets_a: list[MarketData],
         markets_b: list[MarketData],
         min_confidence: Optional[float] = None,
+        max_date_diff_days: int = 14,
     ) -> list[tuple[MarketData, MarketData, float]]:
         """Find matching markets between two lists.
 
@@ -148,6 +175,7 @@ class MarketMatcher:
             markets_a: First list of markets.
             markets_b: Second list of markets.
             min_confidence: Override minimum confidence threshold.
+            max_date_diff_days: Maximum days difference in resolution dates.
 
         Returns:
             List of (market_a, market_b, confidence) tuples.
@@ -165,6 +193,10 @@ class MarketMatcher:
 
             for idx, market_b in enumerate(markets_b):
                 if idx in used_b_indices:
+                    continue
+
+                # Skip if resolution dates are too far apart
+                if not _dates_compatible(market_a.end_date, market_b.end_date, max_date_diff_days):
                     continue
 
                 score = self.calculate_similarity(

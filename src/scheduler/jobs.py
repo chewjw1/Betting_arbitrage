@@ -485,9 +485,10 @@ class ArbitrageScanner:
         result: ArbitrageResult,
         opportunity_type: str = "cross_platform",
     ) -> Optional[str]:
-        """Store a cross-platform opportunity in the database.
+        """Store or update a cross-platform opportunity in the database.
 
-        Creates market records if they don't exist (only for markets with opportunities).
+        If the same opportunity (same markets) already exists and is active,
+        updates it instead of creating a duplicate.
         """
         async with async_session_factory() as session:
             try:
@@ -495,25 +496,47 @@ class ArbitrageScanner:
                 market_a = await self._get_or_create_market(session, result.market_a)
                 market_b = await self._get_or_create_market(session, result.market_b)
 
-                opportunity = Opportunity(
-                    opportunity_type=opportunity_type,
-                    platform_a=result.market_a.platform,
-                    market_a_id=market_a.id,
-                    side_a=result.side_a,
-                    price_a=result.price_a,
-                    platform_b=result.market_b.platform,
-                    market_b_id=market_b.id,
-                    side_b=result.side_b,
-                    price_b=result.price_b,
-                    gross_spread=result.gross_spread,
-                    estimated_fees=result.total_fees,
-                    net_profit_pct=result.net_profit_pct,
-                    position_size=result.position_size,
+                # Check for existing active opportunity with same markets
+                existing_query = select(Opportunity).where(
+                    Opportunity.market_a_id == market_a.id,
+                    Opportunity.market_b_id == market_b.id,
+                    Opportunity.opportunity_type == opportunity_type,
+                    Opportunity.status == "active",
                 )
+                existing_result = await session.execute(existing_query)
+                opportunity = existing_result.scalar_one_or_none()
 
-                session.add(opportunity)
+                if opportunity:
+                    # Update existing opportunity
+                    opportunity.side_a = result.side_a
+                    opportunity.price_a = result.price_a
+                    opportunity.side_b = result.side_b
+                    opportunity.price_b = result.price_b
+                    opportunity.gross_spread = result.gross_spread
+                    opportunity.estimated_fees = result.total_fees
+                    opportunity.net_profit_pct = result.net_profit_pct
+                    opportunity.position_size = result.position_size
+                    opportunity.detected_at = datetime.utcnow()  # Update timestamp
+                else:
+                    # Create new opportunity
+                    opportunity = Opportunity(
+                        opportunity_type=opportunity_type,
+                        platform_a=result.market_a.platform,
+                        market_a_id=market_a.id,
+                        side_a=result.side_a,
+                        price_a=result.price_a,
+                        platform_b=result.market_b.platform,
+                        market_b_id=market_b.id,
+                        side_b=result.side_b,
+                        price_b=result.price_b,
+                        gross_spread=result.gross_spread,
+                        estimated_fees=result.total_fees,
+                        net_profit_pct=result.net_profit_pct,
+                        position_size=result.position_size,
+                    )
+                    session.add(opportunity)
+
                 await session.commit()
-
                 return str(opportunity.id)
 
             except Exception as e:
@@ -521,15 +544,17 @@ class ArbitrageScanner:
                 return None
 
     async def _store_logical_opportunity(self, result) -> Optional[str]:
-        """Store a logical arbitrage opportunity in the database.
+        """Store or update a logical arbitrage opportunity in the database.
 
-        Creates market records if they don't exist (only for markets with opportunities).
+        If the same opportunity already exists and is active,
+        updates it instead of creating a duplicate.
         """
         async with async_session_factory() as session:
             try:
                 rel = result.relationship
                 market_a_data = rel.market_a
                 market_b_data = rel.market_b
+                opp_type = f"logical_{rel.relationship_type.value}"
 
                 # Get or create markets (only stores markets involved in opportunities)
                 market_a_db = await self._get_or_create_market(session, market_a_data)
@@ -540,25 +565,44 @@ class ArbitrageScanner:
                 else:
                     market_b_db = await self._get_or_create_market(session, market_b_data)
 
-                opportunity = Opportunity(
-                    opportunity_type=f"logical_{rel.relationship_type.value}",
-                    platform_a=market_a_data.platform,
-                    market_a_id=market_a_db.id,
-                    side_a="yes",
-                    price_a=market_a_data.yes_price or Decimal("0"),
-                    platform_b=market_b_data.platform,
-                    market_b_id=market_b_db.id,
-                    side_b="no",
-                    price_b=market_b_data.no_price or Decimal("0"),
-                    gross_spread=result.violation_amount,
-                    estimated_fees=result.estimated_fees,
-                    net_profit_pct=result.net_profit_pct,
-                    position_size=Decimal(str(settings.max_position_size)),
+                # Check for existing active opportunity with same markets
+                existing_query = select(Opportunity).where(
+                    Opportunity.market_a_id == market_a_db.id,
+                    Opportunity.market_b_id == market_b_db.id,
+                    Opportunity.opportunity_type == opp_type,
+                    Opportunity.status == "active",
                 )
+                existing_result = await session.execute(existing_query)
+                opportunity = existing_result.scalar_one_or_none()
 
-                session.add(opportunity)
+                if opportunity:
+                    # Update existing opportunity
+                    opportunity.price_a = market_a_data.yes_price or Decimal("0")
+                    opportunity.price_b = market_b_data.no_price or Decimal("0")
+                    opportunity.gross_spread = result.violation_amount
+                    opportunity.estimated_fees = result.estimated_fees
+                    opportunity.net_profit_pct = result.net_profit_pct
+                    opportunity.detected_at = datetime.utcnow()
+                else:
+                    # Create new opportunity
+                    opportunity = Opportunity(
+                        opportunity_type=opp_type,
+                        platform_a=market_a_data.platform,
+                        market_a_id=market_a_db.id,
+                        side_a="yes",
+                        price_a=market_a_data.yes_price or Decimal("0"),
+                        platform_b=market_b_data.platform,
+                        market_b_id=market_b_db.id,
+                        side_b="no",
+                        price_b=market_b_data.no_price or Decimal("0"),
+                        gross_spread=result.violation_amount,
+                        estimated_fees=result.estimated_fees,
+                        net_profit_pct=result.net_profit_pct,
+                        position_size=Decimal(str(settings.max_position_size)),
+                    )
+                    session.add(opportunity)
+
                 await session.commit()
-
                 return str(opportunity.id)
 
             except Exception as e:
