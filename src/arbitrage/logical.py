@@ -912,7 +912,6 @@ class LogicalArbitrageDetector:
                 relationship=relationship,
                 is_violated=False,
                 violation_amount=Decimal("0"),
-                notes=f"Group of {len(prices)} likely incomplete (sum={actual_sum:.2f})",
             )
 
         is_violated = violation > Decimal(str(self.min_violation_pct / 100))
