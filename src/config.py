@@ -71,12 +71,16 @@ class Settings(BaseSettings):
         description="Maximum dollars per side of an arbitrage position",
     )
     api_poll_interval_seconds: int = Field(
-        default=60,
+        default=300,
         description="How often to poll API-based platforms (Kalshi, Polymarket, PredictIt)",
     )
     scrape_poll_interval_seconds: int = Field(
-        default=180,
+        default=600,
         description="How often to poll scraping-based platforms (DraftKings, FanDuel, IBKR)",
+    )
+    enable_scrapers: bool = Field(
+        default=False,
+        description="Enable browser-based scrapers (DraftKings, FanDuel, IBKR). Requires Playwright.",
     )
     # Deduplication: How long to suppress repeat notifications for same opportunity (seconds)
     notification_cooldown_seconds: int = Field(

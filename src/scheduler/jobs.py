@@ -675,7 +675,7 @@ async def main():
     logger.info(
         "Scanner configured",
         api_interval=settings.api_poll_interval_seconds,
-        scrape_interval=settings.scrape_poll_interval_seconds,
+        scrapers_enabled=settings.enable_scrapers,
         notification_cooldown=settings.notification_cooldown_seconds,
         min_profit_threshold=settings.min_net_spread_pct,
     )
@@ -683,7 +683,7 @@ async def main():
     # Create scheduler
     scheduler = AsyncIOScheduler()
 
-    # API scan job (every 60 seconds by default)
+    # API scan job (every 5 min by default)
     scheduler.add_job(
         run_api_scan,
         trigger=IntervalTrigger(seconds=settings.api_poll_interval_seconds),
@@ -693,27 +693,28 @@ async def main():
         max_instances=1,
     )
 
-    # Scrape scan job (every 180 seconds by default)
-    scheduler.add_job(
-        run_scrape_scan,
-        trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
-        id="scrape_scan",
-        name="Scrape Arbitrage Scanner",
-        replace_existing=True,
-        max_instances=1,
-    )
+    # Scrape scan job - only if scrapers enabled
+    if settings.enable_scrapers:
+        scheduler.add_job(
+            run_scrape_scan,
+            trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
+            id="scrape_scan",
+            name="Scrape Arbitrage Scanner",
+            replace_existing=True,
+            max_instances=1,
+        )
 
     # Start scheduler
     scheduler.start()
     logger.info(
         "Scheduler started",
         api_interval=f"{settings.api_poll_interval_seconds}s",
-        scrape_interval=f"{settings.scrape_poll_interval_seconds}s",
+        scrapers="enabled" if settings.enable_scrapers else "disabled",
     )
 
-    # Run initial scans immediately
-    logger.info("Running initial scrape scan (includes all platforms)...")
-    await run_scrape_scan()
+    # Run initial API scan immediately
+    logger.info("Running initial API scan...")
+    await run_api_scan()
 
     # Keep running
     try:
