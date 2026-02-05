@@ -6,7 +6,7 @@ This module runs automatic scans at configurable intervals:
 - Detects both cross-platform AND logical arbitrage
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
-- Stores ALL opportunities in PostgreSQL for dashboard viewing
+- Stores only opportunities and their markets in the database (not all markets)
 
 Usage:
     python -m src.scheduler.jobs
@@ -293,7 +293,7 @@ class ArbitrageScanner:
         start_time: float,
         scan_type: str,
     ) -> dict:
-        """Process collected markets: store, detect, notify.
+        """Process collected markets: detect opportunities, store only what's needed.
 
         Args:
             markets_by_platform: Collected market data.
@@ -303,8 +303,8 @@ class ArbitrageScanner:
         Returns:
             Dict with results.
         """
-        # Store markets and prices in database
-        await self._store_market_data(markets_by_platform)
+        # NOTE: We do NOT store all markets anymore - too slow for SQLite.
+        # Markets involved in opportunities are stored when we store the opportunity.
 
         # --- Cross-Platform Arbitrage Detection ---
         cross_platform_opps = self.cross_platform_detector.find_opportunities(
@@ -453,6 +453,33 @@ class ArbitrageScanner:
 
             await session.commit()
 
+    async def _get_or_create_market(
+        self,
+        session,
+        market_data: MarketData,
+    ) -> Market:
+        """Get existing market or create new one."""
+        query = select(Market).where(
+            Market.platform == market_data.platform,
+            Market.platform_market_id == market_data.platform_market_id,
+        )
+        result = await session.execute(query)
+        market = result.scalar_one_or_none()
+
+        if not market:
+            market = Market(
+                platform=market_data.platform,
+                platform_market_id=market_data.platform_market_id,
+                title=market_data.title,
+                description=market_data.description,
+                url=market_data.url,
+                status="open",
+            )
+            session.add(market)
+            await session.flush()
+
+        return market
+
     async def _store_opportunity(
         self,
         result: ArbitrageResult,
@@ -460,27 +487,13 @@ class ArbitrageScanner:
     ) -> Optional[str]:
         """Store a cross-platform opportunity in the database.
 
-        ALL opportunities are stored for dashboard viewing.
+        Creates market records if they don't exist (only for markets with opportunities).
         """
         async with async_session_factory() as session:
             try:
-                market_a_query = select(Market).where(
-                    Market.platform == result.market_a.platform,
-                    Market.platform_market_id == result.market_a.platform_market_id,
-                )
-                market_b_query = select(Market).where(
-                    Market.platform == result.market_b.platform,
-                    Market.platform_market_id == result.market_b.platform_market_id,
-                )
-
-                market_a_result = await session.execute(market_a_query)
-                market_b_result = await session.execute(market_b_query)
-
-                market_a = market_a_result.scalar_one_or_none()
-                market_b = market_b_result.scalar_one_or_none()
-
-                if not market_a or not market_b:
-                    return None
+                # Get or create markets (only stores markets involved in opportunities)
+                market_a = await self._get_or_create_market(session, result.market_a)
+                market_b = await self._get_or_create_market(session, result.market_b)
 
                 opportunity = Opportunity(
                     opportunity_type=opportunity_type,
@@ -508,43 +521,35 @@ class ArbitrageScanner:
                 return None
 
     async def _store_logical_opportunity(self, result) -> Optional[str]:
-        """Store a logical arbitrage opportunity in the database."""
+        """Store a logical arbitrage opportunity in the database.
+
+        Creates market records if they don't exist (only for markets with opportunities).
+        """
         async with async_session_factory() as session:
             try:
                 rel = result.relationship
-                market_a = rel.market_a
-                market_b = rel.market_b
+                market_a_data = rel.market_a
+                market_b_data = rel.market_b
 
-                market_a_query = select(Market).where(
-                    Market.platform == market_a.platform,
-                    Market.platform_market_id == market_a.platform_market_id,
-                )
+                # Get or create markets (only stores markets involved in opportunities)
+                market_a_db = await self._get_or_create_market(session, market_a_data)
 
-                market_a_result = await session.execute(market_a_query)
-                market_a_db = market_a_result.scalar_one_or_none()
-
-                if not market_a_db:
-                    return None
-
-                market_b_db = market_a_db
-                if market_b.platform_market_id != market_a.platform_market_id:
-                    market_b_query = select(Market).where(
-                        Market.platform == market_b.platform,
-                        Market.platform_market_id == market_b.platform_market_id,
-                    )
-                    market_b_result = await session.execute(market_b_query)
-                    market_b_db = market_b_result.scalar_one_or_none() or market_a_db
+                # For same-market logical arbitrage (complement), both are the same
+                if market_b_data.platform_market_id == market_a_data.platform_market_id:
+                    market_b_db = market_a_db
+                else:
+                    market_b_db = await self._get_or_create_market(session, market_b_data)
 
                 opportunity = Opportunity(
                     opportunity_type=f"logical_{rel.relationship_type.value}",
-                    platform_a=market_a.platform,
+                    platform_a=market_a_data.platform,
                     market_a_id=market_a_db.id,
                     side_a="yes",
-                    price_a=market_a.yes_price or Decimal("0"),
-                    platform_b=market_b.platform,
+                    price_a=market_a_data.yes_price or Decimal("0"),
+                    platform_b=market_b_data.platform,
                     market_b_id=market_b_db.id,
                     side_b="no",
-                    price_b=market_b.no_price or Decimal("0"),
+                    price_b=market_b_data.no_price or Decimal("0"),
                     gross_spread=result.violation_amount,
                     estimated_fees=result.estimated_fees,
                     net_profit_pct=result.net_profit_pct,
