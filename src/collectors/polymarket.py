@@ -133,11 +133,16 @@ class PolymarketCollector(BaseCollector):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
     )
-    async def fetch_markets(self, category: Optional[str] = None) -> list[MarketData]:
-        """Fetch all available markets from Polymarket.
+    async def fetch_markets(
+        self,
+        category: Optional[str] = None,
+        max_markets: int = 1000,
+    ) -> list[MarketData]:
+        """Fetch available markets from Polymarket.
 
         Args:
             category: Optional category filter.
+            max_markets: Maximum markets to fetch (default 1000 to avoid overwhelming DB).
 
         Returns:
             List of MarketData objects.
@@ -149,7 +154,7 @@ class PolymarketCollector(BaseCollector):
         offset = 0
         limit = 100
 
-        while True:
+        while len(markets) < max_markets:
             params = {
                 "limit": limit,
                 "offset": offset,
