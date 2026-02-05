@@ -12,6 +12,44 @@ from src.collectors.base import MarketData
 logger = structlog.get_logger()
 
 
+def _subjects_compatible(title_a: str, platform_a: Optional[str], title_b: str, platform_b: Optional[str]) -> bool:
+    """Check if two matched titles refer to the same subject/candidate.
+
+    PredictIt contracts have format: "Who will win X? - Candidate Name"
+    If one title specifies a candidate and the other specifies a DIFFERENT one, reject.
+
+    Returns:
+        True if subjects are compatible (same person/team, or can't determine).
+    """
+    # Extract PredictIt contract-specific suffix (after " - ")
+    subject_a = None
+    subject_b = None
+
+    if " - " in title_a:
+        subject_a = title_a.split(" - ", 1)[1].strip().lower()
+    if " - " in title_b:
+        subject_b = title_b.split(" - ", 1)[1].strip().lower()
+
+    # If neither has a subject suffix, can't validate
+    if subject_a is None and subject_b is None:
+        return True
+
+    other_title = title_b.lower() if subject_a else title_a.lower()
+    subject = subject_a or subject_b
+
+    # Check if subject's key words appear in the other title
+    subject_words = {w for w in subject.split() if len(w) > 2}
+    # Remove common words
+    subject_words -= {"the", "will", "win", "and", "for", "who"}
+
+    if not subject_words:
+        return True
+
+    # At least one significant word from the subject should appear in the other title
+    matches = sum(1 for w in subject_words if w in other_title)
+    return matches >= 1
+
+
 def _dates_compatible(date_a: Optional[datetime], date_b: Optional[datetime], max_days_diff: int = 14) -> bool:
     """Check if two resolution dates are close enough to be the same event.
 
@@ -197,6 +235,13 @@ class MarketMatcher:
 
                 # Skip if resolution dates are too far apart
                 if not _dates_compatible(market_a.end_date, market_b.end_date, max_date_diff_days):
+                    continue
+
+                # Skip if titles refer to different candidates/subjects
+                if not _subjects_compatible(
+                    market_a.title, market_a.platform,
+                    market_b.title, market_b.platform,
+                ):
                     continue
 
                 score = self.calculate_similarity(

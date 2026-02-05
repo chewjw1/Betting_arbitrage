@@ -31,12 +31,16 @@ class KalshiCollector(BaseCollector):
         self._private_key: Optional[rsa.RSAPrivateKey] = None
 
     async def connect(self) -> None:
-        """Initialize HTTP client and authenticate."""
+        """Initialize HTTP client.
+
+        Note: The markets endpoint is public and doesn't need auth.
+        Auth is only needed for trading/portfolio endpoints.
+        """
         self.client = httpx.AsyncClient(
             base_url=self.settings.kalshi_api_host,
             timeout=30.0,
         )
-        await self._authenticate()
+        self.logger.info("Connected to Kalshi API (read-only)")
 
     async def disconnect(self) -> None:
         """Close HTTP client."""

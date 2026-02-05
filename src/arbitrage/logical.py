@@ -516,12 +516,18 @@ class LogicalArbitrageDetector:
         title_lower = title.lower()
 
         # Try each pattern
-        for pattern, _ in self.TEMPORAL_PATTERNS:
+        for pattern, pattern_type in self.TEMPORAL_PATTERNS:
             match = re.search(pattern, title_lower)
             if match:
                 try:
                     date_str = " ".join(match.groups())
-                    return date_parser.parse(date_str, fuzzy=True)
+                    parsed = date_parser.parse(date_str, fuzzy=True)
+
+                    # "by end of 2026" should be Dec 31, not Jan 1
+                    if pattern_type == "by_year_end":
+                        parsed = parsed.replace(month=12, day=31)
+
+                    return parsed
                 except Exception:
                     continue
 
@@ -874,12 +880,20 @@ class LogicalArbitrageDetector:
         relationship: LogicalRelationship,
         position_size: Decimal,
     ) -> LogicalArbitrageResult:
-        """Check exhaustive constraint: all outcomes should sum to ~1."""
+        """Check exhaustive constraint: all outcomes should sum to ~1.
+
+        Important: Only valid if the group truly covers ALL possible outcomes.
+        Small groups (e.g., 3 out of 20 La Liga teams) will have low sums
+        that are NOT arbitrage — the missing probability belongs to unlisted outcomes.
+        """
         group = relationship.group_markets or [relationship.market_a, relationship.market_b]
 
         # Sum all YES prices
         prices = [(m, m.yes_price) for m in group if m.yes_price is not None]
-        if len(prices) < 2:
+
+        # Require at least 5 markets - small groups are almost never truly exhaustive
+        # (e.g., 2 of 20 football teams, 3 of 15 presidential candidates)
+        if len(prices) < 5:
             return LogicalArbitrageResult(
                 relationship=relationship,
                 is_violated=False,
@@ -890,6 +904,17 @@ class LogicalArbitrageDetector:
         expected_sum = Decimal("1.0")
 
         violation = Decimal("1") - actual_sum if actual_sum < Decimal("1") else Decimal("0")
+
+        # If violation > 15%, the group is probably incomplete (missing outcomes)
+        # Real exhaustive arbitrage should be small (2-10%)
+        if violation > Decimal("0.15"):
+            return LogicalArbitrageResult(
+                relationship=relationship,
+                is_violated=False,
+                violation_amount=Decimal("0"),
+                notes=f"Group of {len(prices)} likely incomplete (sum={actual_sum:.2f})",
+            )
+
         is_violated = violation > Decimal(str(self.min_violation_pct / 100))
 
         profit_pct = Decimal("0")
