@@ -39,6 +39,7 @@ class KalshiCollector(BaseCollector):
         self.client = httpx.AsyncClient(
             base_url=self.settings.kalshi_api_host,
             timeout=30.0,
+            headers={"User-Agent": "Mozilla/5.0"},
         )
         self.logger.info("Connected to Kalshi API (read-only)")
 
