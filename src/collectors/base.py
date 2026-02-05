@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -51,7 +51,13 @@ class MarketData:
         """Calculate days until market resolves."""
         if self.end_date is None:
             return None
-        delta = self.end_date - datetime.utcnow()
+        # Handle both timezone-aware and naive datetimes
+        now = datetime.now(timezone.utc)
+        end = self.end_date
+        if end.tzinfo is None:
+            # Assume naive datetime is UTC
+            end = end.replace(tzinfo=timezone.utc)
+        delta = end - now
         return max(0, delta.days)
 
     @property
