@@ -8,6 +8,7 @@ import structlog
 from src.arbitrage.calculator import ArbitrageCalculator, ArbitrageResult
 from src.collectors.base import MarketData
 from src.matching.fuzzy_matcher import MarketMatcher
+from src.matching.llm_validator import LLMMatchValidator
 
 logger = structlog.get_logger()
 
@@ -17,9 +18,10 @@ class CrossPlatformDetector:
 
     def __init__(
         self,
-        min_net_spread_pct: float = 1.0,
-        min_match_confidence: float = 0.8,
+        min_net_spread_pct: float = 0.5,
+        min_match_confidence: float = 0.65,
         default_position_size: float = 100.0,
+        llm_validator: Optional[LLMMatchValidator] = None,
     ):
         """Initialize detector.
 
@@ -27,16 +29,20 @@ class CrossPlatformDetector:
             min_net_spread_pct: Minimum net profit percentage to alert.
             min_match_confidence: Minimum confidence for automatic market matching.
             default_position_size: Default position size per side.
+            llm_validator: Optional LLM validator for filtering false positive matches.
         """
         self.calculator = ArbitrageCalculator(
             min_net_spread_pct=min_net_spread_pct,
             default_position_size=default_position_size,
         )
-        self.matcher = MarketMatcher(min_confidence=min_match_confidence)
+        self.matcher = MarketMatcher(
+            min_confidence=min_match_confidence,
+            llm_validator=llm_validator,
+        )
         self.min_match_confidence = min_match_confidence
         self.logger = logger.bind(component="CrossPlatformDetector")
 
-    def find_opportunities(
+    async def find_opportunities(
         self,
         markets_by_platform: dict[str, list[MarketData]],
         matched_pairs: Optional[list[tuple[MarketData, MarketData, float]]] = None,
@@ -55,7 +61,7 @@ class CrossPlatformDetector:
 
         if matched_pairs is None:
             # Automatic matching
-            matched_pairs = self._auto_match_markets(markets_by_platform)
+            matched_pairs = await self._auto_match_markets(markets_by_platform)
 
         for market_a, market_b, confidence in matched_pairs:
             # Skip low-confidence matches
@@ -86,11 +92,13 @@ class CrossPlatformDetector:
 
         return opportunities
 
-    def _auto_match_markets(
+    async def _auto_match_markets(
         self,
         markets_by_platform: dict[str, list[MarketData]],
     ) -> list[tuple[MarketData, MarketData, float]]:
         """Automatically match markets across platforms.
+
+        Uses LLM validation if a validator is configured.
 
         Args:
             markets_by_platform: Dict mapping platform name to list of markets.
@@ -107,8 +115,10 @@ class CrossPlatformDetector:
                 markets_a = markets_by_platform[platform_a]
                 markets_b = markets_by_platform[platform_b]
 
-                # Find matches between these two platforms
-                matches = self.matcher.find_matches(markets_a, markets_b)
+                # Use LLM-validated matching if validator is configured
+                matches = await self.matcher.find_matches_validated(
+                    markets_a, markets_b
+                )
 
                 for market_a, market_b, confidence in matches:
                     matched_pairs.append((market_a, market_b, confidence))

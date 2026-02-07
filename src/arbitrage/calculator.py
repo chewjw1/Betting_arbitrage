@@ -85,9 +85,9 @@ class ArbitrageCalculator:
 
     def __init__(
         self,
-        min_net_spread_pct: float = 1.0,
+        min_net_spread_pct: float = 0.5,
         default_position_size: float = 100.0,
-        max_days_to_resolution: int = 90,
+        max_days_to_resolution: int = 180,
         min_liquidity: float = 100.0,
         require_liquidity_data: bool = False,
     ):
@@ -150,6 +150,32 @@ class ArbitrageCalculator:
             return "MEDIUM"
         return "LOW"  # Capital locked too long
 
+    @staticmethod
+    def _buy_yes_price(market: MarketData) -> Optional[Decimal]:
+        """Get the price you'd actually pay to buy YES on this market.
+
+        Uses yes_ask (what sellers are asking) when available,
+        falls back to yes_price (midpoint).
+        """
+        if market.yes_ask is not None and market.yes_ask > 0:
+            return market.yes_ask
+        return market.yes_price
+
+    @staticmethod
+    def _buy_no_price(market: MarketData) -> Optional[Decimal]:
+        """Get the price you'd actually pay to buy NO on this market.
+
+        Uses no_ask when available, then (1 - yes_bid) since selling YES
+        at the bid is equivalent to buying NO, falls back to (1 - yes_price).
+        """
+        if market.no_ask is not None and market.no_ask > 0:
+            return market.no_ask
+        if market.yes_bid is not None and market.yes_bid > 0:
+            return Decimal("1") - market.yes_bid
+        if market.yes_price is not None:
+            return Decimal("1") - market.yes_price
+        return None
+
     def calculate_cross_platform(
         self,
         market_a: MarketData,
@@ -157,6 +183,10 @@ class ArbitrageCalculator:
         position_size: Optional[Decimal] = None,
     ) -> Optional[ArbitrageResult]:
         """Calculate arbitrage opportunity between two markets for the same event.
+
+        Uses bid/ask execution prices when available (what you'd actually pay),
+        falling back to midpoint prices. This eliminates phantom arbs that
+        disappear once you cross the bid/ask spread.
 
         For the same event on different platforms:
         - If YES price on A + NO price on B < 1: Arbitrage exists
@@ -177,6 +207,15 @@ class ArbitrageCalculator:
         if market_a.yes_price is None or market_b.yes_price is None:
             return None
 
+        # Get execution prices (what you'd actually pay)
+        buy_yes_a = self._buy_yes_price(market_a)
+        buy_no_a = self._buy_no_price(market_a)
+        buy_yes_b = self._buy_yes_price(market_b)
+        buy_no_b = self._buy_no_price(market_b)
+
+        if not all([buy_yes_a, buy_no_a, buy_yes_b, buy_no_b]):
+            return None
+
         # Check resolution date filter
         res_ok_a, res_reason_a = self._check_resolution_date(market_a)
         res_ok_b, res_reason_b = self._check_resolution_date(market_b)
@@ -193,13 +232,13 @@ class ArbitrageCalculator:
             self.logger.debug("Filtered by liquidity", reason=reason)
             return None
 
-        # Calculate both possible arbitrage directions
+        # Calculate both possible arbitrage directions using EXECUTION prices
 
         # Direction 1: Buy YES on A, Buy NO on B
-        cost_1 = market_a.yes_price + (Decimal("1") - market_b.yes_price)
+        cost_1 = buy_yes_a + buy_no_b
 
         # Direction 2: Buy NO on A, Buy YES on B
-        cost_2 = (Decimal("1") - market_a.yes_price) + market_b.yes_price
+        cost_2 = buy_no_a + buy_yes_b
 
         # Check if either direction is profitable (cost < 1)
         if cost_1 >= Decimal("1") and cost_2 >= Decimal("1"):
@@ -209,14 +248,14 @@ class ArbitrageCalculator:
         if cost_1 < cost_2:
             side_a = "yes"
             side_b = "no"
-            price_a = market_a.yes_price
-            price_b = Decimal("1") - market_b.yes_price
+            price_a = buy_yes_a
+            price_b = buy_no_b
             total_cost = cost_1
         else:
             side_a = "no"
             side_b = "yes"
-            price_a = Decimal("1") - market_a.yes_price
-            price_b = market_b.yes_price
+            price_a = buy_no_a
+            price_b = buy_yes_b
             total_cost = cost_2
 
         # Calculate profit

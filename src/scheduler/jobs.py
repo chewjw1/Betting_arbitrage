@@ -1,8 +1,8 @@
 """Scheduled jobs for data collection and arbitrage detection.
 
 This module runs automatic scans at configurable intervals:
-- API platforms (Kalshi, Polymarket, PredictIt): every 60 seconds (default)
-- Scraping platforms (DraftKings, FanDuel, IBKR): every 180 seconds (default)
+- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 60 seconds (default)
+- Scraping platforms (FanDuel, IBKR): every 180 seconds (default)
 - Detects both cross-platform AND logical arbitrage
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
@@ -161,18 +161,29 @@ class ArbitrageScanner:
             cooldown_seconds=settings.notification_cooldown_seconds
         )
 
-        # Cross-platform detector
+        # LLM validator for cross-platform matching (optional)
+        llm_validator = None
+        if settings.llm_validation_enabled and settings.openai_api_key:
+            from src.matching.llm_validator import LLMMatchValidator
+            llm_validator = LLMMatchValidator(
+                api_key=settings.openai_api_key,
+                model=settings.llm_model,
+            )
+            self.logger.info("LLM match validation enabled", model=settings.llm_model)
+
+        # Cross-platform detector - lowered confidence for more structural matches
         self.cross_platform_detector = CrossPlatformDetector(
             min_net_spread_pct=self.min_net_spread_pct,
-            min_match_confidence=0.8,
+            min_match_confidence=settings.min_match_confidence,
             default_position_size=settings.max_position_size,
+            llm_validator=llm_validator,
         )
 
-        # Logical arbitrage detector
+        # Logical arbitrage detector - lowered thresholds for structural spreads
         self.logical_detector = LogicalArbitrageDetector(
-            min_violation_pct=2.0,
+            min_violation_pct=1.5,
             min_net_profit_pct=self.min_net_spread_pct,
-            min_relationship_confidence=0.7,
+            min_relationship_confidence=0.65,
         )
 
         # Cached markets from last scrape (used when running API-only scans)
@@ -211,11 +222,12 @@ class ArbitrageScanner:
         start_time = time.time()
         self.logger.info("Starting API scan")
 
-        # API collectors only
+        # API collectors (includes DraftKings - no auth, httpx-based)
         collectors = {
             "kalshi": KalshiCollector(),
             "polymarket": PolymarketCollector(),
             "predictit": PredictItCollector(),
+            "draftkings": DraftKingsCollector(include_sports=False),
         }
 
         # Collect in parallel
@@ -246,9 +258,8 @@ class ArbitrageScanner:
         start_time = time.time()
         self.logger.info("Starting scrape scan")
 
-        # Scraping collectors
+        # Scraping collectors (DraftKings moved to API scan)
         collectors = {
-            "draftkings": DraftKingsCollector(),
             "fanduel": FanDuelCollector(),
             "ibkr": IBKRCollector(),
         }
@@ -307,7 +318,7 @@ class ArbitrageScanner:
         # Markets involved in opportunities are stored when we store the opportunity.
 
         # --- Cross-Platform Arbitrage Detection ---
-        cross_platform_opps = self.cross_platform_detector.find_opportunities(
+        cross_platform_opps = await self.cross_platform_detector.find_opportunities(
             markets_by_platform
         )
 
@@ -507,7 +518,7 @@ class ArbitrageScanner:
                 opportunity = existing_result.scalar_one_or_none()
 
                 if opportunity:
-                    # Update existing opportunity
+                    # Update existing opportunity - track persistence
                     opportunity.side_a = result.side_a
                     opportunity.price_a = result.price_a
                     opportunity.side_b = result.side_b
@@ -517,8 +528,12 @@ class ArbitrageScanner:
                     opportunity.net_profit_pct = result.net_profit_pct
                     opportunity.position_size = result.position_size
                     opportunity.detected_at = datetime.utcnow()  # Update timestamp
+                    opportunity.times_seen = (opportunity.times_seen or 1) + 1
+                    if opportunity.times_seen >= 3:
+                        opportunity.spread_persistent = True
                 else:
                     # Create new opportunity
+                    now = datetime.utcnow()
                     opportunity = Opportunity(
                         opportunity_type=opportunity_type,
                         platform_a=result.market_a.platform,
@@ -533,6 +548,8 @@ class ArbitrageScanner:
                         estimated_fees=result.total_fees,
                         net_profit_pct=result.net_profit_pct,
                         position_size=result.position_size,
+                        first_detected_at=now,
+                        times_seen=1,
                     )
                     session.add(opportunity)
 
@@ -576,29 +593,37 @@ class ArbitrageScanner:
                 opportunity = existing_result.scalar_one_or_none()
 
                 if opportunity:
-                    # Update existing opportunity
+                    # Update existing opportunity - track persistence
                     opportunity.price_a = market_a_data.yes_price or Decimal("0")
                     opportunity.price_b = market_b_data.no_price or Decimal("0")
                     opportunity.gross_spread = result.violation_amount
                     opportunity.estimated_fees = result.estimated_fees
                     opportunity.net_profit_pct = result.net_profit_pct
                     opportunity.detected_at = datetime.utcnow()
+                    opportunity.times_seen = (opportunity.times_seen or 1) + 1
+                    if opportunity.times_seen >= 3:
+                        opportunity.spread_persistent = True
                 else:
                     # Create new opportunity
+                    now = datetime.utcnow()
                     opportunity = Opportunity(
                         opportunity_type=opp_type,
+                        opportunity_subtype=result.subtype,
+                        opportunity_subtype_display=result.subtype_display,
                         platform_a=market_a_data.platform,
                         market_a_id=market_a_db.id,
-                        side_a="yes",
+                        side_a=result.side_a or "yes",
                         price_a=market_a_data.yes_price or Decimal("0"),
                         platform_b=market_b_data.platform,
                         market_b_id=market_b_db.id,
-                        side_b="no",
+                        side_b=result.side_b or "no",
                         price_b=market_b_data.no_price or Decimal("0"),
                         gross_spread=result.violation_amount,
                         estimated_fees=result.estimated_fees,
                         net_profit_pct=result.net_profit_pct,
                         position_size=Decimal(str(settings.max_position_size)),
+                        first_detected_at=now,
+                        times_seen=1,
                     )
                     session.add(opportunity)
 

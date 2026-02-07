@@ -180,6 +180,15 @@ class Opportunity(Base):
     user_action_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     user_notes: Mapped[Optional[str]] = mapped_column(Text)
 
+    # Spread persistence tracking
+    first_detected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )  # When this opportunity was first ever seen
+    times_seen: Mapped[int] = mapped_column(default=1)  # How many scans found this
+    spread_persistent: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # True if seen across 3+ scans = structural
+
     # Actual results (if executed)
     position_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
     actual_profit: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))

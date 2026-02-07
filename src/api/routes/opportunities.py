@@ -57,6 +57,9 @@ def opportunity_to_response(opp: Opportunity) -> OpportunityResponse:
         fee_b_entry=getattr(opp, 'fee_b_entry', None),
         fee_b_profit=getattr(opp, 'fee_b_profit', None),
         fee_b_total=getattr(opp, 'fee_b_total', None),
+        first_detected_at=getattr(opp, 'first_detected_at', None),
+        times_seen=getattr(opp, 'times_seen', 1) or 1,
+        spread_persistent=getattr(opp, 'spread_persistent', False) or False,
     )
 
 

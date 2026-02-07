@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     kalshi_api_key: str = Field(default="")
     kalshi_private_key_path: Path = Field(default=Path("./kalshi_private_key.pem"))
     kalshi_api_host: str = Field(default="https://api.elections.kalshi.com")
+    kalshi_categories: str = Field(
+        default="Politics,Economics,Crypto,Elections,Financials,Climate and Weather,World",
+        description="Comma-separated Kalshi categories to fetch (skips Sports, Entertainment, etc.)",
+    )
+    kalshi_max_markets: int = Field(
+        default=2000,
+        description="Maximum Kalshi markets to fetch per scan",
+    )
 
     # Polymarket API
     polymarket_api_host: str = Field(default="https://clob.polymarket.com")
@@ -63,8 +71,8 @@ class Settings(BaseSettings):
 
     # Arbitrage Settings
     min_net_spread_pct: float = Field(
-        default=1.0,
-        description="Minimum net profit percentage to trigger an alert",
+        default=0.5,
+        description="Minimum net profit percentage to trigger an alert (lowered for structural spreads)",
     )
     max_position_size: float = Field(
         default=500.0,
@@ -84,9 +92,24 @@ class Settings(BaseSettings):
     )
     # Deduplication: How long to suppress repeat notifications for same opportunity (seconds)
     notification_cooldown_seconds: int = Field(
-        default=300,
-        description="Don't re-notify for same market pair within this window (5 min default)",
+        default=600,
+        description="Don't re-notify for same market pair within this window (10 min default)",
     )
+    # Matching confidence threshold
+    min_match_confidence: float = Field(
+        default=0.65,
+        description="Minimum fuzzy match confidence for cross-platform market pairing",
+    )
+    # Resolution window
+    max_days_to_resolution: int = Field(
+        default=180,
+        description="Maximum days until resolution to consider (structural spreads can be longer)",
+    )
+
+    # LLM Match Validation (optional - improves match quality)
+    openai_api_key: str = Field(default="")
+    llm_validation_enabled: bool = Field(default=False)
+    llm_model: str = Field(default="gpt-4o-mini")
 
     # API Settings
     api_host: str = Field(default="0.0.0.0")

@@ -74,6 +74,19 @@
             background: #2f3336;
             color: #a0a0a0;
         }
+        .persistent-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+            background: #065f46;
+            color: #34d399;
+        }
+        .times-seen {
+            font-size: 9px;
+            color: #71767b;
+        }
 
         .grid {
             display: grid;
@@ -409,6 +422,7 @@
             <!-- Filters -->
             <div class="filters">
                 <button class="filter-btn active" data-filter="all" onclick="filterOpportunities('all')">All</button>
+                <button class="filter-btn" data-filter="structural" onclick="filterOpportunities('structural')">Structural Only</button>
                 <button class="filter-btn" data-filter="cross_platform" onclick="filterOpportunities('cross_platform')">Cross-Platform</button>
                 <button class="filter-btn" data-filter="logical" onclick="filterOpportunities('logical')">Logical</button>
                 <button class="filter-btn" data-filter="cross_platform_logical" onclick="filterOpportunities('cross_platform_logical')">Cross-Platform Logical</button>
@@ -478,10 +492,13 @@
             return 'type-cross_platform';
         }
 
-        function getTypeName(type) {
-            if (type === 'cross_platform') return 'Cross-Platform';
-            if (type === 'logical') return 'Logical';
+        function getTypeName(type, platformA, platformB) {
+            if (type === 'cross_platform') return `${(platformA||'').charAt(0).toUpperCase()+platformA.slice(1)} / ${(platformB||'').charAt(0).toUpperCase()+platformB.slice(1)}`;
             if (type === 'cross_platform_logical') return 'X-Plat Logical';
+            if (type && type.startsWith('logical')) {
+                if (platformA === platformB) return `${(platformA||'').charAt(0).toUpperCase()+platformA.slice(1)} Logical`;
+                return 'Logical';
+            }
             return type || 'Unknown';
         }
 
@@ -582,7 +599,9 @@
             const tbody = document.getElementById('opportunities-table');
 
             let filtered = allOpportunities;
-            if (currentFilter !== 'all') {
+            if (currentFilter === 'structural') {
+                filtered = allOpportunities.filter(opp => opp.spread_persistent || opp.times_seen >= 3);
+            } else if (currentFilter !== 'all') {
                 filtered = allOpportunities.filter(opp => opp.opportunity_type === currentFilter);
             }
 
@@ -626,7 +645,9 @@
                             <div class="time-ago">${timeAgo(opp.detected_at)}</div>
                         </td>
                         <td>
-                            <span class="type-badge ${getTypeClass(opp.opportunity_type)}">${getTypeName(opp.opportunity_type)}</span>
+                            <span class="type-badge ${getTypeClass(opp.opportunity_type)}">${getTypeName(opp.opportunity_type, opp.platform_a, opp.platform_b)}</span>
+                            ${opp.spread_persistent ? '<br><span class="persistent-badge">STRUCTURAL</span>' : ''}
+                            ${opp.times_seen > 1 ? `<br><span class="times-seen">Seen ${opp.times_seen}x</span>` : ''}
                             ${subtypeDisplay ? `<br><span class="subtype-badge">${subtypeDisplay}</span>` : ''}
                         </td>
                         <td>
@@ -647,16 +668,28 @@
                         </td>
                         <td>
                             <div class="platform-details">
-                                <div class="platform-row">
-                                    <span class="platform-tag ${getPlatformClass(opp.platform_b)}">${opp.platform_b}</span>
-                                    <div class="platform-info">
-                                        <span class="platform-price">${formatPrice(opp.price_b)}</span>
-                                        <span class="platform-side">${opp.side_b}</span>
+                                ${opp.platform_a === opp.platform_b ?
+                                    `<div class="platform-row">
+                                        <span class="platform-side" style="font-size: 12px; color: #71767b;">Same market</span>
+                                        <div class="platform-info">
+                                            <span class="platform-price">${formatPrice(opp.price_b)}</span>
+                                            <span class="platform-side">${opp.side_b || 'no'}</span>
+                                        </div>
                                     </div>
-                                </div>
-                                ${opp.platform_a !== opp.platform_b && opp.market_b_url ?
-                                    `<a href="${opp.market_b_url}" target="_blank" class="market-link market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || 'View Market'}</a>` :
-                                    opp.platform_a !== opp.platform_b ? `<span class="market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || '-'}</span>` : ''
+                                    ${opp.market_a_url ?
+                                        `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="View on ${opp.platform_a}">View on ${opp.platform_a}</a>` : ''
+                                    }` :
+                                    `<div class="platform-row">
+                                        <span class="platform-tag ${getPlatformClass(opp.platform_b)}">${opp.platform_b}</span>
+                                        <div class="platform-info">
+                                            <span class="platform-price">${formatPrice(opp.price_b)}</span>
+                                            <span class="platform-side">${opp.side_b}</span>
+                                        </div>
+                                    </div>
+                                    ${opp.market_b_url ?
+                                        `<a href="${opp.market_b_url}" target="_blank" class="market-link market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || 'View Market'}</a>` :
+                                        `<span class="market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || '-'}</span>`
+                                    }`
                                 }
                                 ${feeDetailsB}
                             </div>

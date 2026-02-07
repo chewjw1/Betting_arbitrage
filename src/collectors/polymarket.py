@@ -105,14 +105,23 @@ class PolymarketCollector(BaseCollector):
         elif data.get("resolved"):
             status = "resolved"
 
-        # Construct URL - slug is the URL-friendly identifier
-        # conditionId is a hex string that won't work in URLs
-        slug = data.get("slug")
-        if slug:
+        # Construct URL - use multiple fallbacks for reliability
+        # Polymarket URLs use event slugs at /event/{slug} or market-level
+        # slugs. The Gamma API provides both "slug" and "market_slug".
+        slug = data.get("slug") or data.get("market_slug")
+        event_slug = data.get("groupItemTitle") or data.get("eventSlug")
+
+        if event_slug:
+            url = f"https://polymarket.com/event/{event_slug}"
+        elif slug:
             url = f"https://polymarket.com/event/{slug}"
         else:
-            # Fall back to searching by title on Polymarket
-            url = "https://polymarket.com"
+            # Fall back to condition ID for direct link
+            condition_id = data.get("conditionId", data.get("id", ""))
+            if condition_id:
+                url = f"https://polymarket.com/event?id={condition_id}"
+            else:
+                url = "https://polymarket.com"
 
         return MarketData(
             platform=self.platform_name,

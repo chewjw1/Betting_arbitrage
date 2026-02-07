@@ -104,7 +104,7 @@ async def scan_cross_platform():
         matcher=MarketMatcher(min_confidence=0.75),
     )
 
-    opportunities = detector.find_opportunities(all_markets)
+    opportunities = await detector.find_opportunities(all_markets)
 
     print(f"\n{'='*60}")
     print(f"RESULTS: {len(opportunities)} cross-platform opportunities (>1% net)")

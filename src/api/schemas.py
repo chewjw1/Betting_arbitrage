@@ -105,6 +105,11 @@ class OpportunityResponse(OpportunityBase):
     fee_b_profit: Optional[Decimal] = None
     fee_b_total: Optional[Decimal] = None
 
+    # Spread persistence
+    first_detected_at: Optional[datetime] = None
+    times_seen: int = 1
+    spread_persistent: bool = False
+
     class Config:
         from_attributes = True
 
