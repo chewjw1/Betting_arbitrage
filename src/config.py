@@ -79,8 +79,8 @@ class Settings(BaseSettings):
         description="Maximum dollars per side of an arbitrage position",
     )
     api_poll_interval_seconds: int = Field(
-        default=300,
-        description="How often to poll API-based platforms (Kalshi, Polymarket, PredictIt)",
+        default=600,
+        description="How often to poll API-based platforms (10 min default, allows LLM validation to complete)",
     )
     scrape_poll_interval_seconds: int = Field(
         default=600,

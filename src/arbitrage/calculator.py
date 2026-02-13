@@ -45,6 +45,12 @@ class ArbitrageResult:
     liquidity_b: Optional[Decimal] = None
     filtered_reason: Optional[str] = None  # If filtered out, why
 
+    # Slippage estimation
+    slippage_warning: Optional[str] = None  # Warning if likely slippage
+    depth_a: Optional[Decimal] = None  # Contracts available at price_a
+    depth_b: Optional[Decimal] = None  # Contracts available at price_b
+    effective_net_profit_pct: Optional[Decimal] = None  # Net profit after estimated slippage
+
     def __repr__(self) -> str:
         return (
             f"<ArbitrageResult {self.market_a.platform}/{self.market_b.platform} "
@@ -77,6 +83,10 @@ class ArbitrageResult:
             "days_to_resolution": self.days_to_resolution,
             "liquidity_a": float(self.liquidity_a) if self.liquidity_a else None,
             "liquidity_b": float(self.liquidity_b) if self.liquidity_b else None,
+            "slippage_warning": self.slippage_warning,
+            "depth_a": float(self.depth_a) if self.depth_a else None,
+            "depth_b": float(self.depth_b) if self.depth_b else None,
+            "effective_net_profit_pct": float(self.effective_net_profit_pct) if self.effective_net_profit_pct else None,
         }
 
 
@@ -149,6 +159,42 @@ class ArbitrageCalculator:
         if days <= 30:
             return "MEDIUM"
         return "LOW"  # Capital locked too long
+
+    def _estimate_slippage(
+        self,
+        market: MarketData,
+        side: str,
+        position_size: Decimal,
+    ) -> tuple[Optional[Decimal], Optional[str]]:
+        """Estimate slippage based on order book depth.
+
+        Args:
+            market: Market data with depth info.
+            side: "yes" or "no" - which side we're buying.
+            position_size: How much we want to trade in dollars.
+
+        Returns:
+            (depth_available, warning_message)
+        """
+        if side == "yes":
+            depth = market.yes_ask_size
+            price = market.yes_ask or market.yes_price
+        else:
+            depth = market.no_ask_size
+            price = market.no_ask or (Decimal("1") - market.yes_bid if market.yes_bid else None)
+
+        if depth is None or price is None:
+            return None, None
+
+        # Convert depth (contracts) to dollars
+        depth_dollars = depth * price
+
+        if depth_dollars < position_size:
+            shortfall = position_size - depth_dollars
+            warning = f"Only ${float(depth_dollars):.0f} at best price (need ${float(position_size):.0f})"
+            return depth, warning
+
+        return depth, None
 
     @staticmethod
     def _buy_yes_price(market: MarketData) -> Optional[Decimal]:
@@ -281,6 +327,25 @@ class ArbitrageCalculator:
         days_b = market_b.days_to_resolution
         days_to_resolution = min(d for d in [days_a, days_b] if d is not None) if any([days_a, days_b]) else None
 
+        # Estimate slippage
+        depth_a, warning_a = self._estimate_slippage(market_a, side_a, position_size)
+        depth_b, warning_b = self._estimate_slippage(market_b, side_b, position_size)
+
+        slippage_warning = None
+        if warning_a and warning_b:
+            slippage_warning = f"A: {warning_a}; B: {warning_b}"
+        elif warning_a:
+            slippage_warning = f"A: {warning_a}"
+        elif warning_b:
+            slippage_warning = f"B: {warning_b}"
+
+        # Estimate effective profit after slippage (rough: -1% per side with warning)
+        effective_net_profit_pct = net_profit_pct
+        if slippage_warning:
+            slippage_penalty = Decimal("1.0") if warning_a else Decimal("0")
+            slippage_penalty += Decimal("1.0") if warning_b else Decimal("0")
+            effective_net_profit_pct = net_profit_pct - slippage_penalty
+
         return ArbitrageResult(
             market_a=market_a,
             market_b=market_b,
@@ -299,6 +364,10 @@ class ArbitrageCalculator:
             days_to_resolution=days_to_resolution,
             liquidity_a=market_a.volume_24h or market_a.liquidity,
             liquidity_b=market_b.volume_24h or market_b.liquidity,
+            slippage_warning=slippage_warning,
+            depth_a=depth_a,
+            depth_b=depth_b,
+            effective_net_profit_pct=effective_net_profit_pct,
         )
 
     def calculate_same_platform_logical(

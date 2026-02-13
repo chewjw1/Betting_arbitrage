@@ -35,6 +35,12 @@ class MarketData:
     no_bid: Optional[Decimal] = None
     no_ask: Optional[Decimal] = None
 
+    # Order book depth (amount available at best bid/ask)
+    yes_bid_size: Optional[Decimal] = None  # Contracts available at yes_bid
+    yes_ask_size: Optional[Decimal] = None  # Contracts available at yes_ask
+    no_bid_size: Optional[Decimal] = None
+    no_ask_size: Optional[Decimal] = None
+
     # Volume & Liquidity
     yes_volume: Optional[Decimal] = None
     no_volume: Optional[Decimal] = None
