@@ -1,64 +1,64 @@
 """
 Prediction Market Data Sources - Quick Reference
 
-UNIQUE PRICE SOURCES (use these):
-================================
+ACTIVE API SOURCES (4 platforms):
+=================================
 
 1. Kalshi (API)
    - Backend: Kalshi DCM (CFTC-regulated)
-   - Auth: RSA key required
+   - Auth: RSA key optional (public read works)
+   - Categories: Politics, Economics, Crypto, Elections
    - Docs: https://docs.kalshi.com/welcome
 
 2. Polymarket (API)
    - Backend: Polygon blockchain
    - Auth: None for read-only
+   - Categories: Politics, Crypto, Sports, Pop Culture
    - Docs: https://docs.polymarket.com/
 
 3. PredictIt (API)
    - Backend: PredictIt (CFTC no-action letter)
    - Auth: None
+   - Categories: Politics only
    - Endpoint: https://www.predictit.org/api/marketdata/all/
 
 4. DraftKings Predictions (API)
    - Backend: Railbird Exchange (acquired DCM)
-   - Method: Reverse-engineered REST API (no auth, full bid/ask)
+   - Auth: None (reverse-engineered API)
+   - Categories: Economics, Sports
    - URL: https://predictions.draftkings.com
 
-5. IBKR ForecastTrader (Scraping or API)
-   - Backend: ForecastEx DCM + CME contracts
-   - Method: Client Portal API (requires auth) or Playwright scraping
-   - URL: https://forecasttrader.interactivebrokers.com
-   - Note: Zero commission!
+
+PLANNED SOURCES (not yet implemented):
+======================================
+
+- IBKR ForecastTrader: ForecastEx DCM + CME contracts
+  - Requires Client Portal API authentication
+  - Zero commission - great for arbitrage
+  - Will add when IBKR account available
 
 
 REMOVED SOURCES:
 ================
 
-- FanDuel Predicts: Uses CME Group contracts. Removed because:
-  - Requires Playwright scraping (fragile)
-  - Limited state availability (AL, AK, SC, ND, SD)
-  - CME contracts available via IBKR with better API
+- FanDuel Predicts: CME contracts, required Playwright scraping
 
 
 DUPLICATE SOURCES (skip these):
 ==============================
 
-- Robinhood Predictions → Uses Kalshi backend (same prices)
-- Coinbase → Uses Kalshi backend (same prices)
-
-These are just different frontends to Kalshi. No arbitrage possible
-between them and Kalshi since they share the same order book.
+- Robinhood Predictions → Uses Kalshi backend (same order book)
+- Coinbase → Uses Kalshi backend (same order book)
 
 
 ARBITRAGE OPPORTUNITIES:
 ========================
 
 Cross-Platform (same event, different prices):
-- Kalshi ↔ Polymarket (different user bases)
+- Kalshi ↔ Polymarket (different user bases, different fees)
 - Kalshi ↔ PredictIt (different fee structures)
 - Kalshi ↔ DraftKings (Railbird vs Kalshi exchange)
-- Kalshi ↔ IBKR (ForecastEx vs Kalshi)
-- Any combination of the 5 unique sources
+- Any combination of the 4 active sources
 
 Logical (related events, probability inconsistencies):
 - Within any single platform
@@ -74,9 +74,8 @@ from src.collectors.kalshi import KalshiCollector
 from src.collectors.polymarket import PolymarketCollector
 from src.collectors.predictit import PredictItCollector
 from src.collectors.draftkings import DraftKingsCollector
-from src.collectors.ibkr import IBKRCollector
 
-# Primary collectors (unique price sources)
+# All collectors are now API-based (no scraping)
 API_COLLECTORS = {
     "kalshi": KalshiCollector,
     "polymarket": PolymarketCollector,
@@ -84,11 +83,7 @@ API_COLLECTORS = {
     "draftkings": DraftKingsCollector,
 }
 
-SCRAPING_COLLECTORS = {
-    "ibkr": IBKRCollector,
-}
-
-ALL_COLLECTORS = {**API_COLLECTORS, **SCRAPING_COLLECTORS}
+ALL_COLLECTORS = API_COLLECTORS
 
 # These use Kalshi backend - skip to avoid duplicate data
 KALSHI_FRONTENDS = ["robinhood", "coinbase"]
@@ -100,9 +95,7 @@ __all__ = [
     "PolymarketCollector",
     "PredictItCollector",
     "DraftKingsCollector",
-    "IBKRCollector",
     "API_COLLECTORS",
-    "SCRAPING_COLLECTORS",
     "ALL_COLLECTORS",
     "KALSHI_FRONTENDS",
 ]

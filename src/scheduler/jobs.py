@@ -2,11 +2,11 @@
 
 This module runs automatic scans at configurable intervals:
 - API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 5 minutes (default)
-- Scraping platforms (IBKR): every 10 minutes (default, requires Playwright)
 - Detects both cross-platform AND logical arbitrage
+- Uses LLM validation to filter false positive matches (if OPENAI_API_KEY set)
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
-- Stores only opportunities and their markets in the database (not all markets)
+- Stores opportunities in database for dashboard viewing
 
 Usage:
     python -m src.scheduler.jobs
@@ -33,7 +33,6 @@ from src.collectors import (
     PolymarketCollector,
     PredictItCollector,
     DraftKingsCollector,
-    IBKRCollector,
 )
 from src.collectors.base import MarketData
 from src.config import get_settings
@@ -170,7 +169,7 @@ class ArbitrageScanner:
             )
             self.logger.info("LLM match validation enabled", model=settings.llm_model)
 
-        # Cross-platform detector - lowered confidence for more structural matches
+        # Cross-platform detector
         self.cross_platform_detector = CrossPlatformDetector(
             min_net_spread_pct=self.min_net_spread_pct,
             min_match_confidence=settings.min_match_confidence,
@@ -178,16 +177,12 @@ class ArbitrageScanner:
             llm_validator=llm_validator,
         )
 
-        # Logical arbitrage detector - lowered thresholds for structural spreads
+        # Logical arbitrage detector
         self.logical_detector = LogicalArbitrageDetector(
             min_violation_pct=1.5,
             min_net_profit_pct=self.min_net_spread_pct,
             min_relationship_confidence=0.65,
         )
-
-        # Cached markets from last scrape (used when running API-only scans)
-        self._cached_scrape_markets: dict[str, list[MarketData]] = {}
-        self._last_scrape_time: Optional[datetime] = None
 
     async def _collect_from_platform(
         self,
@@ -212,16 +207,16 @@ class ArbitrageScanner:
             )
             return (platform, [])
 
-    async def run_api_scan(self) -> dict:
-        """Run scan for API-based platforms only (fast, every 60s).
+    async def run_scan(self) -> dict:
+        """Run scan across all API platforms.
 
         Returns:
             Dict with scan results.
         """
         start_time = time.time()
-        self.logger.info("Starting API scan")
+        self.logger.info("Starting scan")
 
-        # API collectors (includes DraftKings - no auth, httpx-based)
+        # All collectors are API-based now
         collectors = {
             "kalshi": KalshiCollector(),
             "polymarket": PolymarketCollector(),
@@ -241,80 +236,23 @@ class ArbitrageScanner:
         for platform, markets in results:
             markets_by_platform[platform] = markets
 
-        # Include cached scrape data if available
-        if self._cached_scrape_markets:
-            markets_by_platform.update(self._cached_scrape_markets)
-
-        # Store and detect
-        return await self._process_markets(markets_by_platform, start_time, "api")
-
-    async def run_scrape_scan(self) -> dict:
-        """Run scan for scraping-based platforms (slow, every 10 min).
-
-        Returns:
-            Dict with scan results.
-        """
-        start_time = time.time()
-        self.logger.info("Starting scrape scan")
-
-        # Scraping collectors (only IBKR - FanDuel removed, DraftKings uses API)
-        collectors = {
-            "ibkr": IBKRCollector(),
-        }
-
-        # Collect in parallel
-        tasks = [
-            self._collect_from_platform(platform, collector)
-            for platform, collector in collectors.items()
-        ]
-        results = await asyncio.gather(*tasks)
-
-        # Build and cache markets
-        scrape_markets: dict[str, list[MarketData]] = {}
-        for platform, markets in results:
-            scrape_markets[platform] = markets
-
-        self._cached_scrape_markets = scrape_markets
-        self._last_scrape_time = datetime.utcnow()
-
-        # Combine with API data for full scan
-        # First, get fresh API data
-        api_collectors = {
-            "kalshi": KalshiCollector(),
-            "polymarket": PolymarketCollector(),
-            "predictit": PredictItCollector(),
-        }
-        api_tasks = [
-            self._collect_from_platform(platform, collector)
-            for platform, collector in api_collectors.items()
-        ]
-        api_results = await asyncio.gather(*api_tasks)
-
-        markets_by_platform = dict(api_results)
-        markets_by_platform.update(scrape_markets)
-
-        # Store and detect
-        return await self._process_markets(markets_by_platform, start_time, "full")
+        # Process and detect opportunities
+        return await self._process_markets(markets_by_platform, start_time)
 
     async def _process_markets(
         self,
         markets_by_platform: dict[str, list[MarketData]],
         start_time: float,
-        scan_type: str,
     ) -> dict:
-        """Process collected markets: detect opportunities, store only what's needed.
+        """Process collected markets: detect opportunities, store, notify.
 
         Args:
             markets_by_platform: Collected market data.
             start_time: Scan start time.
-            scan_type: "api" or "full".
 
         Returns:
             Dict with results.
         """
-        # NOTE: We do NOT store all markets anymore - too slow for SQLite.
-        # Markets involved in opportunities are stored when we store the opportunity.
-
         # --- Cross-Platform Arbitrage Detection ---
         cross_platform_opps = await self.cross_platform_detector.find_opportunities(
             markets_by_platform
@@ -330,8 +268,7 @@ class ArbitrageScanner:
             position_size=Decimal(str(settings.max_position_size)),
         )
 
-        # Store ALL opportunities in database (for dashboard)
-        # But only notify if not recently notified
+        # Store opportunities in database and notify
         notifications_sent = 0
 
         for opp in cross_platform_opps:
@@ -355,11 +292,10 @@ class ArbitrageScanner:
 
         # Update dashboard health status
         total_opps = len(cross_platform_opps) + len(logical_opps)
-        update_scan_status(scan_type, markets_by_platform, total_opps)
+        update_scan_status("api", markets_by_platform, total_opps)
 
         self.logger.info(
             "Scan complete",
-            scan_type=scan_type,
             duration_seconds=round(scan_time, 2),
             cross_platform_found=len(cross_platform_opps),
             logical_found=len(logical_opps),
@@ -368,7 +304,6 @@ class ArbitrageScanner:
         )
 
         return {
-            "scan_type": scan_type,
             "cross_platform": cross_platform_opps,
             "logical": logical_opps,
             "notifications_sent": notifications_sent,
@@ -377,90 +312,6 @@ class ArbitrageScanner:
                 p: len(m) for p, m in markets_by_platform.items()
             },
         }
-
-    async def _store_market_data(
-        self,
-        markets_by_platform: dict[str, list[MarketData]],
-    ) -> None:
-        """Store collected market data in the database.
-
-        Price history is only logged every 5th scan (~5 min) to avoid
-        overwhelming SQLite with 25k+ inserts every 60 seconds.
-        """
-        self._scan_count += 1
-        log_history = (self._scan_count % 5 == 0)  # Every 5th scan
-
-        async with async_session_factory() as session:
-            # Only log price history periodically (every ~5 minutes)
-            if log_history:
-                all_markets = []
-                for markets in markets_by_platform.values():
-                    all_markets.extend(markets)
-                history_count = await log_all_prices(session, all_markets)
-                self.logger.info("Logged price history", count=history_count)
-
-            # Store/update markets and latest prices
-            for platform, markets in markets_by_platform.items():
-                for market_data in markets:
-                    try:
-                        # Ensure prices are Decimal, not float
-                        yes_price = market_data.yes_price
-                        no_price = market_data.no_price
-                        if isinstance(yes_price, float):
-                            yes_price = Decimal(str(yes_price))
-                        if isinstance(no_price, float):
-                            no_price = Decimal(str(no_price))
-
-                        query = select(Market).where(
-                            Market.platform == market_data.platform,
-                            Market.platform_market_id == market_data.platform_market_id,
-                        )
-                        result = await session.execute(query)
-                        market = result.scalar_one_or_none()
-
-                        if market:
-                            market.title = market_data.title
-                            market.description = market_data.description
-                            market.status = market_data.status
-                            market.end_date = market_data.end_date
-                            market.url = market_data.url
-                            market.updated_at = datetime.utcnow()
-                        else:
-                            market = Market(
-                                platform=market_data.platform,
-                                platform_market_id=market_data.platform_market_id,
-                                title=market_data.title,
-                                description=market_data.description,
-                                resolution_criteria=market_data.resolution_criteria,
-                                category=market_data.category,
-                                end_date=market_data.end_date,
-                                status=market_data.status,
-                                url=market_data.url,
-                            )
-                            session.add(market)
-                            await session.flush()
-
-                        if yes_price is not None:
-                            price = Price(
-                                market_id=market.id,
-                                yes_price=yes_price,
-                                no_price=no_price,
-                                yes_volume=market_data.yes_volume,
-                                no_volume=market_data.no_volume,
-                                bid_yes=market_data.yes_bid,
-                                ask_yes=market_data.yes_ask,
-                            )
-                            session.add(price)
-
-                    except Exception as e:
-                        self.logger.warning(
-                            "Failed to store market",
-                            platform=platform,
-                            market_id=market_data.platform_market_id,
-                            error=str(e),
-                        )
-
-            await session.commit()
 
     async def _get_or_create_market(
         self,
@@ -525,7 +376,7 @@ class ArbitrageScanner:
                     opportunity.estimated_fees = result.total_fees
                     opportunity.net_profit_pct = result.net_profit_pct
                     opportunity.position_size = result.position_size
-                    opportunity.detected_at = datetime.utcnow()  # Update timestamp
+                    opportunity.detected_at = datetime.utcnow()
                     opportunity.times_seen = (opportunity.times_seen or 1) + 1
                     if opportunity.times_seen >= 3:
                         opportunity.spread_persistent = True
@@ -559,11 +410,7 @@ class ArbitrageScanner:
                 return None
 
     async def _store_logical_opportunity(self, result) -> Optional[str]:
-        """Store or update a logical arbitrage opportunity in the database.
-
-        If the same opportunity already exists and is active,
-        updates it instead of creating a duplicate.
-        """
+        """Store or update a logical arbitrage opportunity in the database."""
         async with async_session_factory() as session:
             try:
                 rel = result.relationship
@@ -571,7 +418,7 @@ class ArbitrageScanner:
                 market_b_data = rel.market_b
                 opp_type = f"logical_{rel.relationship_type.value}"
 
-                # Get or create markets (only stores markets involved in opportunities)
+                # Get or create markets
                 market_a_db = await self._get_or_create_market(session, market_a_data)
 
                 # For same-market logical arbitrage (complement), both are the same
@@ -591,7 +438,7 @@ class ArbitrageScanner:
                 opportunity = existing_result.scalar_one_or_none()
 
                 if opportunity:
-                    # Update existing opportunity - track persistence
+                    # Update existing
                     opportunity.price_a = market_a_data.yes_price or Decimal("0")
                     opportunity.price_b = market_b_data.no_price or Decimal("0")
                     opportunity.gross_spread = result.violation_amount
@@ -602,7 +449,7 @@ class ArbitrageScanner:
                     if opportunity.times_seen >= 3:
                         opportunity.spread_persistent = True
                 else:
-                    # Create new opportunity
+                    # Create new
                     now = datetime.utcnow()
                     opportunity = Opportunity(
                         opportunity_type=opp_type,
@@ -662,28 +509,19 @@ class ArbitrageScanner:
 _scanner: Optional[ArbitrageScanner] = None
 
 
-async def run_api_scan():
-    """Run API-only scan (called every 60s)."""
+async def run_scan():
+    """Run scan (called every interval)."""
     global _scanner
     if _scanner is None:
         _scanner = ArbitrageScanner()
-    await _scanner.run_api_scan()
-
-
-async def run_scrape_scan():
-    """Run full scan including scraping (called every 180s)."""
-    global _scanner
-    if _scanner is None:
-        _scanner = ArbitrageScanner()
-    await _scanner.run_scrape_scan()
+    await _scanner.run_scan()
 
 
 async def main():
     """Main entry point for the scheduler.
 
-    Runs two separate schedules:
-    - API scan: every 60 seconds (Kalshi, Polymarket, PredictIt)
-    - Scrape scan: every 180 seconds (DraftKings, FanDuel, IBKR)
+    Runs scans at configurable intervals (default 5 minutes).
+    All platforms are API-based - no browser scraping required.
     """
     global _scanner
 
@@ -697,47 +535,35 @@ async def main():
 
     logger.info(
         "Scanner configured",
-        api_interval=settings.api_poll_interval_seconds,
-        scrapers_enabled=settings.enable_scrapers,
+        scan_interval=settings.api_poll_interval_seconds,
         notification_cooldown=settings.notification_cooldown_seconds,
         min_profit_threshold=settings.min_net_spread_pct,
+        llm_validation=settings.llm_validation_enabled and bool(settings.openai_api_key),
     )
 
     # Create scheduler
     scheduler = AsyncIOScheduler()
 
-    # API scan job (every 5 min by default)
+    # Single scan job (all API-based)
     scheduler.add_job(
-        run_api_scan,
+        run_scan,
         trigger=IntervalTrigger(seconds=settings.api_poll_interval_seconds),
-        id="api_scan",
-        name="API Arbitrage Scanner",
+        id="arbitrage_scan",
+        name="Arbitrage Scanner",
         replace_existing=True,
         max_instances=1,
     )
-
-    # Scrape scan job - only if scrapers enabled
-    if settings.enable_scrapers:
-        scheduler.add_job(
-            run_scrape_scan,
-            trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
-            id="scrape_scan",
-            name="Scrape Arbitrage Scanner",
-            replace_existing=True,
-            max_instances=1,
-        )
 
     # Start scheduler
     scheduler.start()
     logger.info(
         "Scheduler started",
-        api_interval=f"{settings.api_poll_interval_seconds}s",
-        scrapers="enabled" if settings.enable_scrapers else "disabled",
+        scan_interval=f"{settings.api_poll_interval_seconds}s",
     )
 
-    # Run initial API scan immediately
-    logger.info("Running initial API scan...")
-    await run_api_scan()
+    # Run initial scan immediately
+    logger.info("Running initial scan...")
+    await run_scan()
 
     # Keep running
     try:
