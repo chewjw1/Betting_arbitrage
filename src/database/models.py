@@ -271,3 +271,38 @@ class Notification(Base):
 
     def __repr__(self) -> str:
         return f"<Notification {self.opportunity_id} response={self.response}>"
+
+
+class LLMValidationCache(Base):
+    """Cache LLM validation results to avoid re-validating same title pairs.
+
+    The cache key is a hash of the normalized title pair. Results persist
+    across scanner restarts, saving API costs and time.
+    """
+
+    __tablename__ = "llm_validation_cache"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # SHA256 hash of sorted, normalized title pair
+    cache_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+
+    # Original titles (for debugging/auditing)
+    title_a: Mapped[str] = mapped_column(Text, nullable=False)
+    title_b: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_a: Mapped[str] = mapped_column(String(50), nullable=False)
+    platform_b: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # LLM response
+    is_same_event: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    llm_response: Mapped[Optional[str]] = mapped_column(String(20))  # "SAME" or "DIFFERENT"
+    model_used: Mapped[str] = mapped_column(String(50), default="gpt-4o-mini")
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+
+    def __repr__(self) -> str:
+        return f"<LLMValidationCache {self.cache_key[:16]}... same={self.is_same_event}>"

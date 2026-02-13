@@ -1,6 +1,6 @@
 # Prediction Market Arbitrage System
 
-A system for detecting arbitrage opportunities across prediction markets (Kalshi, Polymarket, PredictIt) with Discord notifications and a web dashboard.
+A system for detecting arbitrage opportunities across prediction markets (Kalshi, Polymarket, PredictIt, DraftKings) with Discord notifications and a web dashboard.
 
 ## Features
 
@@ -68,12 +68,14 @@ Key environment variables in `.env`:
 
 ## Platform Status
 
-| Platform | API Access | Trading | Notes |
-|----------|-----------|---------|-------|
-| Kalshi | ✅ Full REST/WebSocket/FIX | ✅ Yes | Main platform for US users |
-| Polymarket | ✅ REST API | ⚠️ Complex | US access recently restored, monitor ToS |
-| PredictIt | ✅ Read-only API | ❌ Manual | No trading API, good for price comparison |
-| Robinhood | ❌ No public API | N/A | Uses Kalshi backend |
+| Platform | API Access | Trading | Categories | Notes |
+|----------|-----------|---------|------------|-------|
+| Kalshi | ✅ Full REST | ✅ Yes | Politics, Economics, Crypto | Main platform for US users |
+| Polymarket | ✅ REST API | ⚠️ Complex | All | US access restored, monitor ToS |
+| PredictIt | ✅ Read-only API | ❌ Manual | Politics only | No trading API, good for price comparison |
+| DraftKings | ✅ REST API | ❌ Manual | Economics, Sports | Reverse-engineered API |
+| IBKR ForecastTrader | 🔜 Planned | ✅ Yes | All | Requires Client Portal auth, zero commission |
+| Robinhood/Coinbase | ❌ Skip | N/A | Same as Kalshi | Uses Kalshi backend (same order book) |
 
 ## Fee Structure
 
@@ -135,6 +137,33 @@ src/
 3. **Capital Lock-up**: Funds may be locked until market resolution (weeks/months).
 
 4. **Not Financial Advice**: This is a tool for identifying opportunities. All trading decisions are your own.
+
+## TODO / Roadmap
+
+### High Priority
+- [ ] **Discord Integration Testing** - Verify reaction handling (✅/❌) updates opportunity status in database
+- [ ] **Dashboard Review** - Confirm opportunities display with market URLs for quick execution
+- [ ] **Kalshi Authenticated API** - Add RSA key auth for full market access and better rate limits
+
+### Medium Priority
+- [ ] **IBKR ForecastTrader API** - Implement Client Portal API (requires IBKR account)
+  - Zero commission = great for small spreads
+  - Endpoint: `GET /v1/api/trsrv/event/category-tree`
+- [ ] **Better fee modeling** - Add slippage estimation based on order book depth
+- [ ] **Historical analysis** - Price movement patterns to identify best scan times
+
+### Nice to Have
+- [ ] **Auto-execution** - Trading API integration for Kalshi/Polymarket
+- [ ] **Mobile notifications** - Push notifications via Pushover/Telegram
+- [ ] **Backtesting** - Test strategies against historical data
+
+### Completed
+- [x] Multi-platform API collectors (Kalshi, Polymarket, PredictIt, DraftKings)
+- [x] LLM validation for cross-platform matching (GPT-4o-mini with persistent caching)
+- [x] Fee-aware arbitrage calculations
+- [x] Discord notifications with deduplication
+- [x] Web dashboard with auto-refresh
+- [x] Persistent LLM cache to avoid re-validating same pairs
 
 ## Development
 
