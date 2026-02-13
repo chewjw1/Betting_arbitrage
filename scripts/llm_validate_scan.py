@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Live scan with LLM validation using GPT-4o-mini or Claude Haiku.
+"""Live scan with LLM validation using GPT-4o-mini.
 
 This script fetches markets from public APIs and validates fuzzy matches
-using an LLM to filter false positives.
+using GPT-4o-mini to filter false positives.
 
 Usage:
     OPENAI_API_KEY=sk-... python scripts/llm_validate_scan.py
-
-    Or with Anthropic:
-    ANTHROPIC_API_KEY=sk-ant-... LLM_PROVIDER=anthropic python scripts/llm_validate_scan.py
 """
 
 import asyncio
@@ -36,36 +33,22 @@ DIFFERENT if: different people, countries, time periods, positions (president vs
 
 
 class LLMValidator:
-    """Simple LLM validator for the standalone script."""
+    """GPT-4o-mini validator for the standalone script."""
 
     def __init__(self):
-        self.openai_key = os.environ.get("OPENAI_API_KEY", "")
-        self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self.provider = os.environ.get("LLM_PROVIDER", "openai")
+        self.api_key = os.environ.get("OPENAI_API_KEY", "")
+        self.model = "gpt-4o-mini"
         self.cache: dict[str, bool] = {}
         self.calls = 0
         self.rejections = 0
-
-        # Select provider based on available keys (OpenAI preferred - cheaper)
-        if self.provider == "openai" and self.openai_key:
-            self.model = "gpt-4o-mini"
-        elif self.anthropic_key:
-            self.provider = "anthropic"
-            self.model = "claude-3-haiku-20240307"
-        elif self.openai_key:
-            self.provider = "openai"
-            self.model = "gpt-4o-mini"
-        else:
-            self.provider = None
-            self.model = None
 
     def _cache_key(self, title_a: str, title_b: str) -> str:
         pair = tuple(sorted([title_a.strip().lower(), title_b.strip().lower()]))
         return hashlib.sha256(f"{pair[0]}||{pair[1]}".encode()).hexdigest()
 
     async def validate(self, title_a: str, platform_a: str, title_b: str, platform_b: str) -> bool:
-        if not self.provider:
-            return True  # No LLM available, keep all matches
+        if not self.api_key:
+            return True  # No API key, keep all matches
 
         key = self._cache_key(title_a, title_b)
         if key in self.cache:
@@ -82,40 +65,22 @@ class LLMValidator:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                if self.provider == "anthropic":
-                    response = await client.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "x-api-key": self.anthropic_key,
-                            "anthropic-version": "2023-06-01",
-                            "content-type": "application/json",
-                        },
-                        json={
-                            "model": self.model,
-                            "max_tokens": 10,
-                            "messages": [{"role": "user", "content": prompt}],
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    answer = data["content"][0]["text"].strip().upper()
-                else:
-                    response = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.openai_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": self.model,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": 0,
-                            "max_tokens": 10,
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    answer = data["choices"][0]["message"]["content"].strip().upper()
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0,
+                        "max_tokens": 10,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                answer = data["choices"][0]["message"]["content"].strip().upper()
 
                 result = answer.startswith("SAME")
                 self.cache[key] = result
@@ -257,7 +222,7 @@ async def find_and_validate_matches(
 
     print(f"  Fuzzy candidates: {len(candidates)} (limited to {max_candidates})")
 
-    if not validator.provider:
+    if not validator.api_key:
         return candidates
 
     # Second pass: LLM validation
@@ -291,10 +256,10 @@ async def main():
 
     # Initialize validator
     validator = LLMValidator()
-    if validator.provider:
-        print(f"\nLLM Provider: {validator.provider} ({validator.model})")
+    if validator.api_key:
+        print(f"\nLLM: GPT-4o-mini")
     else:
-        print("\nNo LLM API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
+        print("\nNo OPENAI_API_KEY found. Set it to enable LLM validation.")
         print("Proceeding with fuzzy matching only (will have false positives)...")
 
     # Fetch markets
@@ -401,7 +366,7 @@ async def main():
     print(f"Markets scanned:      {total}")
     print(f"Fuzzy candidates:     (limited to 100 per pair)")
 
-    if validator.provider:
+    if validator.api_key:
         print(f"LLM calls made:       {validator.calls}")
         print(f"LLM rejections:       {validator.rejections}")
         if validator.calls > 0:
