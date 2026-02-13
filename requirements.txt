@@ -41,6 +41,7 @@ python-Levenshtein>=0.23.0
 
 # LLM validation (optional - for cross-platform match filtering)
 openai>=1.0.0
+anthropic>=0.18.0
 
 # Cryptography (for Kalshi RSA auth)
 cryptography>=41.0.0

@@ -1,6 +1,6 @@
 """LLM-based validation for cross-platform market matching.
 
-Uses GPT-4o-mini to validate whether two prediction market titles
+Uses Claude Haiku or GPT-4o-mini to validate whether two prediction market titles
 are asking about the same real-world event, filtering out false
 positives from fuzzy matching.
 
@@ -9,7 +9,7 @@ to avoid re-validating the same pairs across scanner restarts.
 """
 
 import hashlib
-from typing import Optional
+from typing import Optional, Union
 
 import structlog
 
@@ -22,6 +22,8 @@ class LLMMatchValidator:
     Uses a two-tier caching strategy:
     1. In-memory cache for fast lookups within a session
     2. Database cache for persistence across restarts
+
+    Supports both Anthropic (Claude) and OpenAI (GPT) as providers.
     """
 
     PROMPT_TEMPLATE = (
@@ -36,23 +38,44 @@ class LLMMatchValidator:
         "or fundamentally different questions."
     )
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-3-haiku-20240307",
+        provider: str = "anthropic",
+    ):
         """Initialize validator.
 
         Args:
-            api_key: OpenAI API key.
+            api_key: API key for the LLM provider.
             model: Model to use for validation.
+            provider: 'anthropic' for Claude or 'openai' for GPT.
         """
         self.model = model
+        self.provider = provider
         self._memory_cache: dict[str, bool] = {}
         self.logger = logger.bind(component="LLMMatchValidator")
 
-        try:
-            from openai import AsyncOpenAI
-            self._client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=api_key)
-        except ImportError:
-            self.logger.warning("openai package not installed, LLM validation disabled")
-            self._client = None
+        self._client: Optional[Union["AsyncAnthropic", "AsyncOpenAI"]] = None
+
+        if provider == "anthropic":
+            try:
+                from anthropic import AsyncAnthropic
+                self._client = AsyncAnthropic(api_key=api_key)
+                self.logger.info("Initialized Anthropic client", model=model)
+            except ImportError:
+                self.logger.warning("anthropic package not installed, trying OpenAI fallback")
+                provider = "openai"
+
+        if provider == "openai":
+            try:
+                from openai import AsyncOpenAI
+                self._client = AsyncOpenAI(api_key=api_key)
+                self.provider = "openai"
+                self.logger.info("Initialized OpenAI client", model=model)
+            except ImportError:
+                self.logger.warning("openai package not installed, LLM validation disabled")
+                self._client = None
 
     @staticmethod
     def _cache_key(title_a: str, title_b: str) -> str:
@@ -143,6 +166,25 @@ class LLMMatchValidator:
             # Don't fail if cache write fails - the validation still works
             self.logger.warning("DB cache store failed", error=str(e))
 
+    async def _call_anthropic(self, prompt: str) -> str:
+        """Call Anthropic Claude API."""
+        response = await self._client.messages.create(
+            model=self.model,
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip().upper()
+
+    async def _call_openai(self, prompt: str) -> str:
+        """Call OpenAI API."""
+        response = await self._client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10,
+        )
+        return response.choices[0].message.content.strip().upper()
+
     async def validate_match(
         self,
         title_a: str,
@@ -191,13 +233,11 @@ class LLMMatchValidator:
         )
 
         try:
-            response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=10,
-            )
-            answer = response.choices[0].message.content.strip().upper()
+            if self.provider == "anthropic":
+                answer = await self._call_anthropic(prompt)
+            else:
+                answer = await self._call_openai(prompt)
+
             result = answer.startswith("SAME")
 
             # Store in both caches
@@ -214,6 +254,7 @@ class LLMMatchValidator:
 
             self.logger.debug(
                 "LLM validation",
+                provider=self.provider,
                 title_a=title_a[:60],
                 title_b=title_b[:60],
                 result=answer,
@@ -234,8 +275,10 @@ class LLMMatchValidator:
         """Get cache statistics.
 
         Returns:
-            Dict with memory cache size.
+            Dict with memory cache size and provider info.
         """
         return {
             "memory_cache_size": len(self._memory_cache),
+            "provider": self.provider,
+            "model": self.model,
         }

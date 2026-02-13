@@ -106,13 +106,21 @@ class Settings(BaseSettings):
         description="Maximum days until resolution to consider (structural spreads can be longer)",
     )
 
-    # LLM Match Validation (enabled by default if OPENAI_API_KEY is set)
+    # LLM Match Validation (enabled by default if API key is set)
     openai_api_key: str = Field(default="")
+    anthropic_api_key: str = Field(default="")
     llm_validation_enabled: bool = Field(
         default=True,
-        description="Use GPT-4o-mini to validate fuzzy matches. Requires OPENAI_API_KEY.",
+        description="Use LLM to validate fuzzy matches. Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.",
     )
-    llm_model: str = Field(default="gpt-4o-mini")
+    llm_provider: str = Field(
+        default="anthropic",
+        description="LLM provider: 'anthropic' (Claude) or 'openai' (GPT). Anthropic preferred.",
+    )
+    llm_model: str = Field(
+        default="claude-3-haiku-20240307",
+        description="Model to use. Anthropic: claude-3-haiku-20240307. OpenAI: gpt-4o-mini.",
+    )
 
     # API Settings
     api_host: str = Field(default="0.0.0.0")
