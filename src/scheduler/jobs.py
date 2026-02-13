@@ -1,12 +1,12 @@
 """Scheduled jobs for data collection and arbitrage detection.
 
 This module runs automatic scans at configurable intervals:
-- API platforms (Kalshi, Polymarket, PredictIt): every 60 seconds (default)
-- Scraping platforms (DraftKings, FanDuel, IBKR): every 180 seconds (default)
+- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 60 seconds (default)
+- Scraping platforms (FanDuel, IBKR): every 180 seconds (default)
 - Detects both cross-platform AND logical arbitrage
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
-- Stores ALL opportunities in PostgreSQL for dashboard viewing
+- Stores only opportunities and their markets in the database (not all markets)
 
 Usage:
     python -m src.scheduler.jobs
@@ -154,24 +154,36 @@ class ArbitrageScanner:
         self.discord_bot = discord_bot
         self.min_net_spread_pct = min_net_spread_pct or settings.min_net_spread_pct
         self.logger = logger.bind(component="ArbitrageScanner")
+        self._scan_count = 0  # Track scans for periodic price history logging
 
         # Deduplicator for notifications
         self.deduplicator = NotificationDeduplicator(
             cooldown_seconds=settings.notification_cooldown_seconds
         )
 
-        # Cross-platform detector
+        # LLM validator for cross-platform matching (optional)
+        llm_validator = None
+        if settings.llm_validation_enabled and settings.openai_api_key:
+            from src.matching.llm_validator import LLMMatchValidator
+            llm_validator = LLMMatchValidator(
+                api_key=settings.openai_api_key,
+                model=settings.llm_model,
+            )
+            self.logger.info("LLM match validation enabled", model=settings.llm_model)
+
+        # Cross-platform detector - lowered confidence for more structural matches
         self.cross_platform_detector = CrossPlatformDetector(
             min_net_spread_pct=self.min_net_spread_pct,
-            min_match_confidence=0.8,
+            min_match_confidence=settings.min_match_confidence,
             default_position_size=settings.max_position_size,
+            llm_validator=llm_validator,
         )
 
-        # Logical arbitrage detector
+        # Logical arbitrage detector - lowered thresholds for structural spreads
         self.logical_detector = LogicalArbitrageDetector(
-            min_violation_pct=2.0,
+            min_violation_pct=1.5,
             min_net_profit_pct=self.min_net_spread_pct,
-            min_relationship_confidence=0.7,
+            min_relationship_confidence=0.65,
         )
 
         # Cached markets from last scrape (used when running API-only scans)
@@ -210,11 +222,12 @@ class ArbitrageScanner:
         start_time = time.time()
         self.logger.info("Starting API scan")
 
-        # API collectors only
+        # API collectors (includes DraftKings - no auth, httpx-based)
         collectors = {
             "kalshi": KalshiCollector(),
             "polymarket": PolymarketCollector(),
             "predictit": PredictItCollector(),
+            "draftkings": DraftKingsCollector(include_sports=False),
         }
 
         # Collect in parallel
@@ -245,9 +258,8 @@ class ArbitrageScanner:
         start_time = time.time()
         self.logger.info("Starting scrape scan")
 
-        # Scraping collectors
+        # Scraping collectors (DraftKings moved to API scan)
         collectors = {
-            "draftkings": DraftKingsCollector(),
             "fanduel": FanDuelCollector(),
             "ibkr": IBKRCollector(),
         }
@@ -292,7 +304,7 @@ class ArbitrageScanner:
         start_time: float,
         scan_type: str,
     ) -> dict:
-        """Process collected markets: store, detect, notify.
+        """Process collected markets: detect opportunities, store only what's needed.
 
         Args:
             markets_by_platform: Collected market data.
@@ -302,11 +314,11 @@ class ArbitrageScanner:
         Returns:
             Dict with results.
         """
-        # Store markets and prices in database
-        await self._store_market_data(markets_by_platform)
+        # NOTE: We do NOT store all markets anymore - too slow for SQLite.
+        # Markets involved in opportunities are stored when we store the opportunity.
 
         # --- Cross-Platform Arbitrage Detection ---
-        cross_platform_opps = self.cross_platform_detector.find_opportunities(
+        cross_platform_opps = await self.cross_platform_detector.find_opportunities(
             markets_by_platform
         )
 
@@ -372,17 +384,35 @@ class ArbitrageScanner:
         self,
         markets_by_platform: dict[str, list[MarketData]],
     ) -> None:
-        """Store collected market data in the database and log price history."""
+        """Store collected market data in the database.
+
+        Price history is only logged every 5th scan (~5 min) to avoid
+        overwhelming SQLite with 25k+ inserts every 60 seconds.
+        """
+        self._scan_count += 1
+        log_history = (self._scan_count % 5 == 0)  # Every 5th scan
+
         async with async_session_factory() as session:
-            # Log all prices to history table (for analysis)
-            all_markets = []
-            for markets in markets_by_platform.values():
-                all_markets.extend(markets)
-            history_count = await log_all_prices(session, all_markets)
-            self.logger.debug("Logged price history", count=history_count)
+            # Only log price history periodically (every ~5 minutes)
+            if log_history:
+                all_markets = []
+                for markets in markets_by_platform.values():
+                    all_markets.extend(markets)
+                history_count = await log_all_prices(session, all_markets)
+                self.logger.info("Logged price history", count=history_count)
+
+            # Store/update markets and latest prices
             for platform, markets in markets_by_platform.items():
                 for market_data in markets:
                     try:
+                        # Ensure prices are Decimal, not float
+                        yes_price = market_data.yes_price
+                        no_price = market_data.no_price
+                        if isinstance(yes_price, float):
+                            yes_price = Decimal(str(yes_price))
+                        if isinstance(no_price, float):
+                            no_price = Decimal(str(no_price))
+
                         query = select(Market).where(
                             Market.platform == market_data.platform,
                             Market.platform_market_id == market_data.platform_market_id,
@@ -412,11 +442,11 @@ class ArbitrageScanner:
                             session.add(market)
                             await session.flush()
 
-                        if market_data.yes_price is not None:
+                        if yes_price is not None:
                             price = Price(
                                 market_id=market.id,
-                                yes_price=market_data.yes_price,
-                                no_price=market_data.no_price,
+                                yes_price=yes_price,
+                                no_price=no_price,
                                 yes_volume=market_data.yes_volume,
                                 no_volume=market_data.no_volume,
                                 bid_yes=market_data.yes_bid,
@@ -434,54 +464,96 @@ class ArbitrageScanner:
 
             await session.commit()
 
+    async def _get_or_create_market(
+        self,
+        session,
+        market_data: MarketData,
+    ) -> Market:
+        """Get existing market or create new one."""
+        query = select(Market).where(
+            Market.platform == market_data.platform,
+            Market.platform_market_id == market_data.platform_market_id,
+        )
+        result = await session.execute(query)
+        market = result.scalar_one_or_none()
+
+        if not market:
+            market = Market(
+                platform=market_data.platform,
+                platform_market_id=market_data.platform_market_id,
+                title=market_data.title,
+                description=market_data.description,
+                url=market_data.url,
+                status="open",
+            )
+            session.add(market)
+            await session.flush()
+
+        return market
+
     async def _store_opportunity(
         self,
         result: ArbitrageResult,
         opportunity_type: str = "cross_platform",
     ) -> Optional[str]:
-        """Store a cross-platform opportunity in the database.
+        """Store or update a cross-platform opportunity in the database.
 
-        ALL opportunities are stored for dashboard viewing.
+        If the same opportunity (same markets) already exists and is active,
+        updates it instead of creating a duplicate.
         """
         async with async_session_factory() as session:
             try:
-                market_a_query = select(Market).where(
-                    Market.platform == result.market_a.platform,
-                    Market.platform_market_id == result.market_a.platform_market_id,
+                # Get or create markets (only stores markets involved in opportunities)
+                market_a = await self._get_or_create_market(session, result.market_a)
+                market_b = await self._get_or_create_market(session, result.market_b)
+
+                # Check for existing active opportunity with same markets
+                existing_query = select(Opportunity).where(
+                    Opportunity.market_a_id == market_a.id,
+                    Opportunity.market_b_id == market_b.id,
+                    Opportunity.opportunity_type == opportunity_type,
+                    Opportunity.status == "active",
                 )
-                market_b_query = select(Market).where(
-                    Market.platform == result.market_b.platform,
-                    Market.platform_market_id == result.market_b.platform_market_id,
-                )
+                existing_result = await session.execute(existing_query)
+                opportunity = existing_result.scalar_one_or_none()
 
-                market_a_result = await session.execute(market_a_query)
-                market_b_result = await session.execute(market_b_query)
+                if opportunity:
+                    # Update existing opportunity - track persistence
+                    opportunity.side_a = result.side_a
+                    opportunity.price_a = result.price_a
+                    opportunity.side_b = result.side_b
+                    opportunity.price_b = result.price_b
+                    opportunity.gross_spread = result.gross_spread
+                    opportunity.estimated_fees = result.total_fees
+                    opportunity.net_profit_pct = result.net_profit_pct
+                    opportunity.position_size = result.position_size
+                    opportunity.detected_at = datetime.utcnow()  # Update timestamp
+                    opportunity.times_seen = (opportunity.times_seen or 1) + 1
+                    if opportunity.times_seen >= 3:
+                        opportunity.spread_persistent = True
+                else:
+                    # Create new opportunity
+                    now = datetime.utcnow()
+                    opportunity = Opportunity(
+                        opportunity_type=opportunity_type,
+                        platform_a=result.market_a.platform,
+                        market_a_id=market_a.id,
+                        side_a=result.side_a,
+                        price_a=result.price_a,
+                        platform_b=result.market_b.platform,
+                        market_b_id=market_b.id,
+                        side_b=result.side_b,
+                        price_b=result.price_b,
+                        gross_spread=result.gross_spread,
+                        estimated_fees=result.total_fees,
+                        net_profit_pct=result.net_profit_pct,
+                        position_size=result.position_size,
+                        first_detected_at=now,
+                        times_seen=1,
+                    )
+                    session.add(opportunity)
 
-                market_a = market_a_result.scalar_one_or_none()
-                market_b = market_b_result.scalar_one_or_none()
-
-                if not market_a or not market_b:
-                    return None
-
-                opportunity = Opportunity(
-                    opportunity_type=opportunity_type,
-                    platform_a=result.market_a.platform,
-                    market_a_id=market_a.id,
-                    side_a=result.side_a,
-                    price_a=result.price_a,
-                    platform_b=result.market_b.platform,
-                    market_b_id=market_b.id,
-                    side_b=result.side_b,
-                    price_b=result.price_b,
-                    gross_spread=result.gross_spread,
-                    estimated_fees=result.total_fees,
-                    net_profit_pct=result.net_profit_pct,
-                    position_size=result.position_size,
-                )
-
-                session.add(opportunity)
                 await session.commit()
-
                 return str(opportunity.id)
 
             except Exception as e:
@@ -489,52 +561,73 @@ class ArbitrageScanner:
                 return None
 
     async def _store_logical_opportunity(self, result) -> Optional[str]:
-        """Store a logical arbitrage opportunity in the database."""
+        """Store or update a logical arbitrage opportunity in the database.
+
+        If the same opportunity already exists and is active,
+        updates it instead of creating a duplicate.
+        """
         async with async_session_factory() as session:
             try:
                 rel = result.relationship
-                market_a = rel.market_a
-                market_b = rel.market_b
+                market_a_data = rel.market_a
+                market_b_data = rel.market_b
+                opp_type = f"logical_{rel.relationship_type.value}"
 
-                market_a_query = select(Market).where(
-                    Market.platform == market_a.platform,
-                    Market.platform_market_id == market_a.platform_market_id,
+                # Get or create markets (only stores markets involved in opportunities)
+                market_a_db = await self._get_or_create_market(session, market_a_data)
+
+                # For same-market logical arbitrage (complement), both are the same
+                if market_b_data.platform_market_id == market_a_data.platform_market_id:
+                    market_b_db = market_a_db
+                else:
+                    market_b_db = await self._get_or_create_market(session, market_b_data)
+
+                # Check for existing active opportunity with same markets
+                existing_query = select(Opportunity).where(
+                    Opportunity.market_a_id == market_a_db.id,
+                    Opportunity.market_b_id == market_b_db.id,
+                    Opportunity.opportunity_type == opp_type,
+                    Opportunity.status == "active",
                 )
+                existing_result = await session.execute(existing_query)
+                opportunity = existing_result.scalar_one_or_none()
 
-                market_a_result = await session.execute(market_a_query)
-                market_a_db = market_a_result.scalar_one_or_none()
-
-                if not market_a_db:
-                    return None
-
-                market_b_db = market_a_db
-                if market_b.platform_market_id != market_a.platform_market_id:
-                    market_b_query = select(Market).where(
-                        Market.platform == market_b.platform,
-                        Market.platform_market_id == market_b.platform_market_id,
+                if opportunity:
+                    # Update existing opportunity - track persistence
+                    opportunity.price_a = market_a_data.yes_price or Decimal("0")
+                    opportunity.price_b = market_b_data.no_price or Decimal("0")
+                    opportunity.gross_spread = result.violation_amount
+                    opportunity.estimated_fees = result.estimated_fees
+                    opportunity.net_profit_pct = result.net_profit_pct
+                    opportunity.detected_at = datetime.utcnow()
+                    opportunity.times_seen = (opportunity.times_seen or 1) + 1
+                    if opportunity.times_seen >= 3:
+                        opportunity.spread_persistent = True
+                else:
+                    # Create new opportunity
+                    now = datetime.utcnow()
+                    opportunity = Opportunity(
+                        opportunity_type=opp_type,
+                        opportunity_subtype=result.subtype,
+                        opportunity_subtype_display=result.subtype_display,
+                        platform_a=market_a_data.platform,
+                        market_a_id=market_a_db.id,
+                        side_a=result.side_a or "yes",
+                        price_a=market_a_data.yes_price or Decimal("0"),
+                        platform_b=market_b_data.platform,
+                        market_b_id=market_b_db.id,
+                        side_b=result.side_b or "no",
+                        price_b=market_b_data.no_price or Decimal("0"),
+                        gross_spread=result.violation_amount,
+                        estimated_fees=result.estimated_fees,
+                        net_profit_pct=result.net_profit_pct,
+                        position_size=Decimal(str(settings.max_position_size)),
+                        first_detected_at=now,
+                        times_seen=1,
                     )
-                    market_b_result = await session.execute(market_b_query)
-                    market_b_db = market_b_result.scalar_one_or_none() or market_a_db
+                    session.add(opportunity)
 
-                opportunity = Opportunity(
-                    opportunity_type=f"logical_{rel.relationship_type.value}",
-                    platform_a=market_a.platform,
-                    market_a_id=market_a_db.id,
-                    side_a="yes",
-                    price_a=market_a.yes_price or Decimal("0"),
-                    platform_b=market_b.platform,
-                    market_b_id=market_b_db.id,
-                    side_b="no",
-                    price_b=market_b.no_price or Decimal("0"),
-                    gross_spread=result.violation_amount,
-                    estimated_fees=result.estimated_fees,
-                    net_profit_pct=result.net_profit_pct,
-                    position_size=Decimal(str(settings.max_position_size)),
-                )
-
-                session.add(opportunity)
                 await session.commit()
-
                 return str(opportunity.id)
 
             except Exception as e:
@@ -607,7 +700,7 @@ async def main():
     logger.info(
         "Scanner configured",
         api_interval=settings.api_poll_interval_seconds,
-        scrape_interval=settings.scrape_poll_interval_seconds,
+        scrapers_enabled=settings.enable_scrapers,
         notification_cooldown=settings.notification_cooldown_seconds,
         min_profit_threshold=settings.min_net_spread_pct,
     )
@@ -615,7 +708,7 @@ async def main():
     # Create scheduler
     scheduler = AsyncIOScheduler()
 
-    # API scan job (every 60 seconds by default)
+    # API scan job (every 5 min by default)
     scheduler.add_job(
         run_api_scan,
         trigger=IntervalTrigger(seconds=settings.api_poll_interval_seconds),
@@ -625,27 +718,28 @@ async def main():
         max_instances=1,
     )
 
-    # Scrape scan job (every 180 seconds by default)
-    scheduler.add_job(
-        run_scrape_scan,
-        trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
-        id="scrape_scan",
-        name="Scrape Arbitrage Scanner",
-        replace_existing=True,
-        max_instances=1,
-    )
+    # Scrape scan job - only if scrapers enabled
+    if settings.enable_scrapers:
+        scheduler.add_job(
+            run_scrape_scan,
+            trigger=IntervalTrigger(seconds=settings.scrape_poll_interval_seconds),
+            id="scrape_scan",
+            name="Scrape Arbitrage Scanner",
+            replace_existing=True,
+            max_instances=1,
+        )
 
     # Start scheduler
     scheduler.start()
     logger.info(
         "Scheduler started",
         api_interval=f"{settings.api_poll_interval_seconds}s",
-        scrape_interval=f"{settings.scrape_poll_interval_seconds}s",
+        scrapers="enabled" if settings.enable_scrapers else "disabled",
     )
 
-    # Run initial scans immediately
-    logger.info("Running initial scrape scan (includes all platforms)...")
-    await run_scrape_scan()
+    # Run initial API scan immediately
+    logger.info("Running initial API scan...")
+    await run_api_scan()
 
     # Keep running
     try:

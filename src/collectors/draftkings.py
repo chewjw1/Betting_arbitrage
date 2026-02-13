@@ -1,343 +1,530 @@
 """DraftKings Predictions collector.
 
 DraftKings Predictions: https://predictions.draftkings.com
-- No official public API
-- Uses Playwright browser automation for scraping
-- Available in 38 states including Georgia
+- Uses reverse-engineered API (no auth required for market data)
+- Catalog fetched from Remix turbo-stream (.data endpoints)
+- Live bid/ask prices from polling endpoint
 - CFTC-regulated through acquired Railbird Exchange (own DCM)
 - NOT affiliated with Kalshi - independent price source
+
+API Endpoints:
+  Catalog: GET https://predictions.draftkings.com/en/{category}.data
+  Prices:  POST https://api.draftkings.com/en/predict/v1/polling/clients/web/markets
 """
 
 import asyncio
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, Page
+import httpx
 import structlog
 
 from src.collectors.base import BaseCollector, MarketData
-from src.config import get_settings
 
 logger = structlog.get_logger()
 
+# Categories available on DraftKings Predictions
+# Sports categories are included but can be filtered out if desired
+DK_CATEGORIES = [
+    "economics",
+    "sb",       # Super Bowl / NFL
+    "olympics",
+    "nba",
+    "nhl",
+    "cbb",      # College basketball
+    "golf",
+]
+
+# Non-sports categories most useful for cross-platform arbitrage
+DK_NON_SPORTS_CATEGORIES = ["economics"]
+
+# Module-level catalog cache (persists across collector instances)
+_catalog_cache: dict[str, list[dict]] = {}
+_catalog_cache_time: Optional[datetime] = None
+_CATALOG_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+def _decode_turbo_stream(raw_data: list) -> dict:
+    """Decode Remix turbo-stream flat JSON array into structured data.
+
+    The turbo-stream format is a flat JSON array where:
+    - Objects use _N keys, where N is an array index for the field name
+    - Values are either literals or array indices referencing other values
+    - Negative indices are sentinel values (null/undefined)
+
+    Returns dict with:
+        market_groups: list of {ticker, title, market_tickers: [str], ...}
+        markets: list of {ticker, title, group_ticker, group_title, close_date, ...}
+    """
+    arr = raw_data
+
+    def resolve(idx):
+        if isinstance(idx, int) and 0 <= idx < len(arr):
+            return arr[idx]
+        return idx
+
+    def decode_obj(obj):
+        if not isinstance(obj, dict):
+            return obj
+        result = {}
+        for k, v in obj.items():
+            k_idx = int(k.lstrip("_"))
+            k_name = resolve(k_idx)
+            if not isinstance(k_name, str):
+                k_name = f"idx_{k_idx}"
+            result[k_name] = resolve(v)
+        return result
+
+    # Step 1: Find marketGroups section
+    groups_data = []
+    mg_dict_idx = None
+    for i, elem in enumerate(arr):
+        if isinstance(elem, str) and elem == "marketGroups":
+            mg_dict_idx = i + 1
+            break
+
+    if mg_dict_idx is not None and isinstance(arr[mg_dict_idx], dict):
+        for _ref_key, group_idx in arr[mg_dict_idx].items():
+            group_obj = decode_obj(arr[group_idx])
+            ticker = group_obj.get("ticker", "")
+            title = group_obj.get("title", "")
+
+            # Get list of individual market tickers
+            # The markets list contains array indices that need resolving
+            market_tickers = []
+            raw_markets = group_obj.get("markets", [])
+            if isinstance(raw_markets, list):
+                for item in raw_markets:
+                    resolved_item = resolve(item) if isinstance(item, int) else item
+                    if isinstance(resolved_item, str) and resolved_item.startswith("DKP"):
+                        market_tickers.append(resolved_item)
+
+            groups_data.append({
+                "ticker": ticker,
+                "title": title,
+                "market_tickers": market_tickers,
+            })
+
+    # Step 2: Find detailed market catalog (section with individual market objects)
+    # This is a dict mapping ticker indices to full market objects with titles like "At least 50,000"
+    markets_data = []
+    group_title_map = {g["ticker"]: g["title"] for g in groups_data}
+
+    # Collect all known individual market tickers from groups
+    all_group_market_tickers = set()
+    for g in groups_data:
+        all_group_market_tickers.update(g["market_tickers"])
+
+    # Find the catalog dict - it's a large dict whose keys resolve to individual
+    # market tickers (DKP2-...-XXXX or DKP3-...). It contains full market objects
+    # with title, close date, strike info, etc.
+    catalog_idx = None
+    for i, elem in enumerate(arr):
+        if isinstance(elem, dict) and len(elem) > 5:
+            # Check if first key resolves to a known market ticker
+            first_key = next(iter(elem), "")
+            first_key_idx = int(first_key.lstrip("_")) if first_key.startswith("_") else -1
+            if first_key_idx >= 0:
+                first_key_val = resolve(first_key_idx)
+                if isinstance(first_key_val, str) and first_key_val in all_group_market_tickers:
+                    # Verify the value is an object (not just a price store)
+                    first_val = resolve(elem[first_key])
+                    if isinstance(first_val, dict) and len(first_val) > 5:
+                        catalog_idx = i
+                        break
+
+    if catalog_idx is not None:
+        catalog = arr[catalog_idx]
+        for ref_key, obj_idx in catalog.items():
+            ticker_idx = int(ref_key.lstrip("_"))
+            ticker = resolve(ticker_idx)
+            if not isinstance(ticker, str) or not ticker.startswith("DKP"):
+                continue
+
+            obj = decode_obj(arr[obj_idx])
+            market_title = obj.get("title", "")
+            group_ticker = obj.get("marketGroupTicker", "")
+            close_date = obj.get("closedDateUtc", "")
+            status = obj.get("status", "")
+            vol24h = obj.get("volume24Hours", 0)
+            floor_strike = obj.get("floorStrike")
+            strike_type = obj.get("strikeType", "")
+
+            # Build full title: "Group Title: Market Title"
+            group_title = group_title_map.get(group_ticker, "")
+            if group_title and market_title:
+                full_title = f"{group_title}: {market_title}"
+            elif group_title:
+                full_title = group_title
+            elif market_title:
+                full_title = market_title
+            else:
+                full_title = ticker
+
+            markets_data.append({
+                "ticker": ticker,
+                "title": full_title,
+                "market_title": market_title,
+                "group_ticker": group_ticker,
+                "group_title": group_title,
+                "close_date": close_date,
+                "status": status,
+                "volume_24h": vol24h,
+                "floor_strike": floor_strike,
+                "strike_type": strike_type,
+            })
+
+    return {
+        "market_groups": groups_data,
+        "markets": markets_data,
+    }
+
 
 class DraftKingsCollector(BaseCollector):
-    """Collector for DraftKings Predictions using Playwright scraping."""
+    """Collector for DraftKings Predictions using reverse-engineered API.
+
+    No authentication required. Uses two endpoints:
+    1. Catalog from Remix turbo-stream (market tickers + titles + close dates)
+    2. Polling endpoint for live bid/ask prices
+    """
 
     platform_name = "draftkings"
 
+    CATALOG_URL = "https://predictions.draftkings.com/en/{category}.data"
+    POLLING_URL = "https://api.draftkings.com/en/predict/v1/polling/clients/web/markets"
     BASE_URL = "https://predictions.draftkings.com"
-    CATEGORIES = ["sports", "politics", "entertainment", "finance"]
 
-    def __init__(self):
-        """Initialize collector."""
+    # Max tickers per polling request (API limit unknown, stay conservative)
+    POLLING_BATCH_SIZE = 100
+
+    def __init__(self, categories: Optional[list[str]] = None, include_sports: bool = True):
+        """Initialize collector.
+
+        Args:
+            categories: List of category slugs to fetch. If None, uses all available.
+            include_sports: If False, only fetch non-sports categories (economics, etc.)
+        """
         super().__init__()
-        self.settings = get_settings()
-        self.browser: Optional[Browser] = None
-        self._playwright = None
+        if categories:
+            self.categories = categories
+        elif include_sports:
+            self.categories = list(DK_CATEGORIES)
+        else:
+            self.categories = list(DK_NON_SPORTS_CATEGORIES)
+        self.client: Optional[httpx.AsyncClient] = None
         self.logger = logger.bind(component="DraftKingsCollector")
 
     async def connect(self) -> None:
-        """Initialize Playwright browser."""
-        self._playwright = await async_playwright().start()
-        self.browser = await self._playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+        """Initialize HTTP client."""
+        self.client = httpx.AsyncClient(
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+            },
+            follow_redirects=True,
         )
-        self.logger.info("Started Playwright browser for DraftKings scraping")
+        self.logger.info("Connected to DraftKings Predictions API")
 
     async def disconnect(self) -> None:
-        """Close browser."""
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
+        """Close HTTP client."""
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
-    async def _scroll_to_load_all(self, page: Page, max_scrolls: int = 10) -> None:
-        """Scroll page to load all dynamic content."""
-        for _ in range(max_scrolls):
-            previous_height = await page.evaluate("document.body.scrollHeight")
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1000)
-            new_height = await page.evaluate("document.body.scrollHeight")
-            if new_height == previous_height:
-                break
-
-    async def _scrape_page(self, page: Page, url: str) -> list[dict]:
-        """Scrape markets from a page.
+    async def _fetch_catalog(self, category: str) -> list[dict]:
+        """Fetch market catalog from turbo-stream for a category.
 
         Args:
-            page: Playwright page.
-            url: URL to scrape.
+            category: Category slug (e.g., 'economics', 'nba').
 
         Returns:
-            List of raw market dicts.
+            List of market dicts with ticker, title, close_date, etc.
         """
-        markets = []
+        global _catalog_cache, _catalog_cache_time
 
+        # Check cache
+        now = datetime.utcnow()
+        cache_valid = (
+            _catalog_cache_time is not None
+            and (now - _catalog_cache_time).total_seconds() < _CATALOG_CACHE_TTL_SECONDS
+        )
+        if cache_valid and category in _catalog_cache:
+            return _catalog_cache[category]
+
+        url = self.CATALOG_URL.format(category=category)
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(2000)
+            response = await self.client.get(
+                url,
+                headers={"Accept": "text/x-turbo"},
+            )
+            response.raise_for_status()
+            raw_data = json.loads(response.text)
+            decoded = _decode_turbo_stream(raw_data)
+            markets = decoded["markets"]
 
-            # Scroll to load all content
-            await self._scroll_to_load_all(page)
+            # Cache the result
+            _catalog_cache[category] = markets
+            _catalog_cache_time = now
 
-            # Try multiple selector patterns (site structure may vary)
-            selectors = [
-                '[data-testid="market-card"]',
-                '[class*="market-card"]',
-                '[class*="MarketCard"]',
-                '[class*="prediction-card"]',
-                'article[class*="market"]',
-            ]
+            self.logger.info(
+                "Fetched DK catalog",
+                category=category,
+                groups=len(decoded["market_groups"]),
+                markets=len(markets),
+            )
+            return markets
 
-            market_elements = []
-            for selector in selectors:
-                elements = await page.query_selector_all(selector)
-                if elements:
-                    market_elements = elements
-                    self.logger.debug(f"Found {len(elements)} markets with selector: {selector}")
-                    break
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                self.logger.debug("Category not found", category=category)
+                return []
+            self.logger.warning(
+                "Failed to fetch DK catalog",
+                category=category,
+                status=e.response.status_code,
+            )
+            return []
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            self.logger.warning(
+                "Failed to parse DK turbo-stream",
+                category=category,
+                error=str(e),
+            )
+            return []
 
-            for element in market_elements:
-                try:
-                    market = await self._parse_element(element)
-                    if market and market.get("title"):
-                        markets.append(market)
-                except Exception as e:
-                    self.logger.debug("Failed to parse element", error=str(e))
-
-        except Exception as e:
-            self.logger.warning("Failed to scrape page", url=url, error=str(e))
-
-        return markets
-
-    async def _parse_element(self, element) -> Optional[dict]:
-        """Parse a market card element.
-
-        Args:
-            element: Market card element.
-
-        Returns:
-            Dict with market data or None.
-        """
-        # Try multiple patterns for title
-        title = None
-        title_selectors = [
-            '[data-testid="market-title"]',
-            '[class*="title"]',
-            '[class*="Title"]',
-            'h3', 'h4',
-            '[class*="question"]',
-        ]
-
-        for selector in title_selectors:
-            title_el = await element.query_selector(selector)
-            if title_el:
-                title = await title_el.inner_text()
-                if title and len(title) > 5:
-                    break
-
-        if not title:
-            return None
-
-        # Try to find prices
-        yes_price = None
-        no_price = None
-
-        # Look for price elements
-        price_selectors = [
-            ('[data-testid="yes-price"]', '[data-testid="no-price"]'),
-            ('[class*="yes-price"]', '[class*="no-price"]'),
-            ('[class*="YesPrice"]', '[class*="NoPrice"]'),
-        ]
-
-        for yes_sel, no_sel in price_selectors:
-            yes_el = await element.query_selector(yes_sel)
-            no_el = await element.query_selector(no_sel)
-            if yes_el:
-                yes_text = await yes_el.inner_text()
-                yes_price = self._parse_price(yes_text)
-            if no_el:
-                no_text = await no_el.inner_text()
-                no_price = self._parse_price(no_text)
-            if yes_price is not None or no_price is not None:
-                break
-
-        # Fallback: look for any price-like elements
-        if yes_price is None and no_price is None:
-            price_elements = await element.query_selector_all('[class*="price"], [class*="Price"], [class*="cost"]')
-            for i, el in enumerate(price_elements[:2]):
-                text = await el.inner_text()
-                price = self._parse_price(text)
-                if price is not None:
-                    if i == 0:
-                        yes_price = price
-                    else:
-                        no_price = price
-
-        # Get URL if available
-        url = None
-        link = await element.query_selector("a")
-        if link:
-            url = await link.get_attribute("href")
-            if url and not url.startswith("http"):
-                url = f"{self.BASE_URL}{url}"
-
-        return {
-            "title": title.strip(),
-            "yes_price": yes_price,
-            "no_price": no_price,
-            "url": url,
-        }
-
-    def _parse_price(self, text: str) -> Optional[float]:
-        """Parse price from text.
+    async def _fetch_prices(self, tickers: list[str]) -> dict[str, dict]:
+        """Fetch live bid/ask prices for market tickers.
 
         Args:
-            text: Price text (e.g., "45¢", "$0.45", "45%", "45").
+            tickers: List of market ticker strings.
 
         Returns:
-            Float price in dollars (0.0 to 1.0) or None.
+            Dict mapping ticker to price data {yesAsk, yesBid, noAsk, noBid, volume, lastPrice}.
         """
-        if not text:
-            return None
+        all_prices = {}
 
-        cleaned = text.strip().replace(",", "").replace(" ", "")
+        # Batch the requests
+        for i in range(0, len(tickers), self.POLLING_BATCH_SIZE):
+            batch = tickers[i : i + self.POLLING_BATCH_SIZE]
+            try:
+                response = await self.client.post(
+                    self.POLLING_URL,
+                    json={"marketTickers": batch, "languageCode": "en"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://predictions.draftkings.com",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
 
-        try:
-            # Handle cent notation (45¢)
-            if "¢" in cleaned:
-                return float(cleaned.replace("¢", "")) / 100
+                for ticker, market_data in data.get("markets", {}).items():
+                    binary = market_data.get("details", {}).get("binary", {})
+                    all_prices[ticker] = {
+                        "yes_ask": binary.get("yesAsk", 0),
+                        "yes_bid": binary.get("yesBid", 0),
+                        "no_ask": binary.get("noAsk", 0),
+                        "no_bid": binary.get("noBid", 0),
+                        "volume": market_data.get("volume", 0),
+                        "last_price": market_data.get("lastPrice", 0),
+                    }
 
-            # Handle dollar notation ($0.45)
-            if "$" in cleaned:
-                value = float(cleaned.replace("$", ""))
-                return value if value <= 1 else value / 100
+            except httpx.HTTPStatusError as e:
+                self.logger.warning(
+                    "DK polling request failed",
+                    status=e.response.status_code,
+                    batch_size=len(batch),
+                )
+            except Exception as e:
+                self.logger.warning("DK polling error", error=str(e))
 
-            # Handle percentage (45%)
-            if "%" in cleaned:
-                return float(cleaned.replace("%", "")) / 100
+            # Small delay between batches
+            if i + self.POLLING_BATCH_SIZE < len(tickers):
+                await asyncio.sleep(0.2)
 
-            # Handle plain number
-            value = float(cleaned)
-            # Assume cents if > 1
-            return value / 100 if value > 1 else value
+        return all_prices
 
-        except ValueError:
-            return None
-
-    def _to_market_data(self, raw: dict) -> MarketData:
-        """Convert raw scraped data to MarketData.
+    def _to_market_data(self, catalog_entry: dict, prices: dict[str, dict]) -> Optional[MarketData]:
+        """Convert catalog entry + prices into MarketData.
 
         Args:
-            raw: Raw market dict.
+            catalog_entry: Market dict from catalog.
+            prices: Price data dict from polling endpoint.
 
         Returns:
-            MarketData object.
+            MarketData or None if no price data.
         """
-        title = raw.get("title", "Unknown")
-        market_id = raw.get("id") or str(hash(title))
+        ticker = catalog_entry["ticker"]
+        price_data = prices.get(ticker)
 
-        yes_price = None
-        no_price = None
+        # Skip markets with no price data at all
+        if not price_data:
+            return None
 
-        if raw.get("yes_price") is not None:
-            yes_price = Decimal(str(raw["yes_price"]))
-        if raw.get("no_price") is not None:
-            no_price = Decimal(str(raw["no_price"]))
+        # Prices are in cents (0-100), convert to decimals (0.00-1.00)
+        yes_ask_cents = price_data.get("yes_ask", 0)
+        yes_bid_cents = price_data.get("yes_bid", 0)
+        no_ask_cents = price_data.get("no_ask", 0)
+        no_bid_cents = price_data.get("no_bid", 0)
 
-        # Calculate complement if only one price available
-        if yes_price is not None and no_price is None:
+        # Skip markets where all prices are 0 (no orders)
+        if yes_ask_cents == 0 and yes_bid_cents == 0 and no_ask_cents == 0 and no_bid_cents == 0:
+            return None
+
+        yes_ask = Decimal(str(yes_ask_cents)) / 100 if yes_ask_cents else None
+        yes_bid = Decimal(str(yes_bid_cents)) / 100 if yes_bid_cents else None
+        no_ask = Decimal(str(no_ask_cents)) / 100 if no_ask_cents else None
+        no_bid = Decimal(str(no_bid_cents)) / 100 if no_bid_cents else None
+
+        # Calculate midpoint price for yes/no
+        if yes_bid and yes_ask:
+            yes_price = (yes_bid + yes_ask) / 2
+        elif yes_ask:
+            yes_price = yes_ask
+        elif yes_bid:
+            yes_price = yes_bid
+        else:
+            yes_price = None
+
+        if no_bid and no_ask:
+            no_price = (no_bid + no_ask) / 2
+        elif yes_price is not None:
             no_price = Decimal("1") - yes_price
-        elif no_price is not None and yes_price is None:
-            yes_price = Decimal("1") - no_price
+        else:
+            no_price = None
+
+        # Parse close date
+        end_date = None
+        close_str = catalog_entry.get("close_date", "")
+        if close_str:
+            try:
+                # Handle .NET style datetime: "2026-02-11T13:29:00.0000000Z"
+                clean = close_str.replace("Z", "+00:00")
+                if "." in clean:
+                    # Truncate fractional seconds to 6 digits
+                    dot_idx = clean.index(".")
+                    plus_idx = clean.index("+", dot_idx) if "+" in clean[dot_idx:] else len(clean)
+                    frac = clean[dot_idx + 1 : plus_idx][:6]
+                    clean = clean[:dot_idx + 1] + frac + clean[plus_idx:]
+                end_date = datetime.fromisoformat(clean)
+            except (ValueError, AttributeError):
+                pass
+
+        # Build URL
+        group_ticker = catalog_entry.get("group_ticker", "")
+        url = f"{self.BASE_URL}/en/details/{group_ticker}" if group_ticker else self.BASE_URL
+
+        # Volume from polling endpoint
+        volume = price_data.get("volume", 0)
+        vol_24h = catalog_entry.get("volume_24h", 0)
 
         return MarketData(
             platform=self.platform_name,
-            platform_market_id=market_id,
-            title=title,
-            description=raw.get("description"),
-            category=raw.get("category"),
-            end_date=None,
-            status="open",
-            url=raw.get("url") or self.BASE_URL,
+            platform_market_id=ticker,
+            title=catalog_entry["title"],
+            description=catalog_entry.get("market_title", ""),
+            category=catalog_entry.get("group_title", ""),
+            end_date=end_date,
+            status="open" if catalog_entry.get("status") == "Open" else "closed",
+            url=url,
             yes_price=yes_price,
             no_price=no_price,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            no_bid=no_bid,
+            no_ask=no_ask,
+            total_volume=Decimal(str(volume)) if volume else None,
+            volume_24h=Decimal(str(vol_24h)) if vol_24h else None,
         )
 
-    async def fetch_markets(self, category: Optional[str] = None) -> list[MarketData]:
-        """Fetch all available markets.
+    async def fetch_markets(
+        self,
+        category: Optional[str] = None,
+        max_markets: int = 5000,
+    ) -> list[MarketData]:
+        """Fetch all available markets from DraftKings Predictions.
 
         Args:
-            category: Optional category filter.
+            category: Optional single category to fetch. If None, fetches all configured categories.
+            max_markets: Maximum number of markets to return.
 
         Returns:
-            List of MarketData objects.
+            List of MarketData objects with live bid/ask prices.
         """
-        if not self.browser:
-            raise RuntimeError("Browser not initialized. Call connect() first.")
+        if not self.client:
+            raise RuntimeError("Collector not connected. Call connect() first.")
 
-        page = await self.browser.new_page()
-        all_raw_markets = []
+        categories = [category] if category else self.categories
+        all_catalog_entries = []
 
-        try:
-            if category:
-                # Scrape specific category
-                url = f"{self.BASE_URL}/category/{category}"
-                raw_markets = await self._scrape_page(page, url)
-                for m in raw_markets:
-                    m["category"] = category
-                all_raw_markets.extend(raw_markets)
-            else:
-                # Scrape main page first
-                raw_markets = await self._scrape_page(page, self.BASE_URL)
-                all_raw_markets.extend(raw_markets)
+        # Step 1: Fetch catalogs for all categories
+        for cat in categories:
+            entries = await self._fetch_catalog(cat)
+            # Only include open markets
+            open_entries = [e for e in entries if e.get("status") == "Open"]
+            all_catalog_entries.extend(open_entries)
 
-                # Then try each category
-                for cat in self.CATEGORIES:
-                    await asyncio.sleep(1)  # Rate limiting
-                    url = f"{self.BASE_URL}/category/{cat}"
-                    raw_markets = await self._scrape_page(page, url)
-                    for m in raw_markets:
-                        m["category"] = cat
-                    all_raw_markets.extend(raw_markets)
+            if len(all_catalog_entries) >= max_markets:
+                all_catalog_entries = all_catalog_entries[:max_markets]
+                break
 
-        finally:
-            await page.close()
+        if not all_catalog_entries:
+            self.logger.info("No DraftKings markets found in catalog")
+            return []
 
-        # Deduplicate by title
-        seen_titles = set()
-        unique_markets = []
-        for raw in all_raw_markets:
-            title = raw.get("title", "").lower()
-            if title and title not in seen_titles:
-                seen_titles.add(title)
-                unique_markets.append(raw)
+        # Step 2: Fetch live prices for all tickers
+        tickers = [e["ticker"] for e in all_catalog_entries]
+        prices = await self._fetch_prices(tickers)
 
-        # Convert to MarketData
+        # Step 3: Build MarketData objects
         markets = []
-        for raw in unique_markets:
-            try:
-                market = self._to_market_data(raw)
+        for entry in all_catalog_entries:
+            market = self._to_market_data(entry, prices)
+            if market:
                 markets.append(market)
-            except Exception as e:
-                self.logger.warning("Failed to parse market", error=str(e))
 
-        self.logger.info("Fetched DraftKings markets", count=len(markets))
+        self.logger.info(
+            "Fetched DraftKings markets",
+            categories=categories,
+            catalog_count=len(all_catalog_entries),
+            priced_count=len(markets),
+        )
         return markets
 
     async def fetch_market(self, market_id: str) -> Optional[MarketData]:
-        """Fetch a specific market by ID."""
-        markets = await self.fetch_markets()
-        for market in markets:
-            if market.platform_market_id == market_id:
-                return market
-        return None
+        """Fetch a specific market by ticker.
+
+        Args:
+            market_id: Market ticker (e.g., 'DKP2-ECNFPG6-M50000').
+
+        Returns:
+            MarketData if found, None otherwise.
+        """
+        if not self.client:
+            raise RuntimeError("Collector not connected. Call connect() first.")
+
+        # Fetch prices for this single ticker
+        prices = await self._fetch_prices([market_id])
+        if market_id not in prices:
+            return None
+
+        # We need catalog info too - check cache or fetch the relevant category
+        for cat_entries in _catalog_cache.values():
+            for entry in cat_entries:
+                if entry["ticker"] == market_id:
+                    return self._to_market_data(entry, prices)
+
+        # If not in cache, create a minimal entry
+        price_data = prices[market_id]
+        return self._to_market_data(
+            {
+                "ticker": market_id,
+                "title": market_id,
+                "status": "Open",
+                "close_date": "",
+            },
+            prices,
+        )

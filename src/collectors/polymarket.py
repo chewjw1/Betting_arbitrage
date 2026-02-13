@@ -59,22 +59,33 @@ class PolymarketCollector(BaseCollector):
         no_price = None
 
         outcomes = data.get("outcomes", [])
-        if len(outcomes) >= 2:
+        if isinstance(outcomes, list) and len(outcomes) >= 2:
             # Polymarket uses outcome prices as decimals
             for outcome in outcomes:
-                if outcome.get("outcome", "").lower() == "yes":
+                # Skip if outcome is not a dict
+                if not isinstance(outcome, dict):
+                    continue
+                outcome_name = outcome.get("outcome", "").lower()
+                if outcome_name == "yes":
                     if outcome.get("price"):
                         yes_price = Decimal(str(outcome["price"]))
-                elif outcome.get("outcome", "").lower() == "no":
+                elif outcome_name == "no":
                     if outcome.get("price"):
                         no_price = Decimal(str(outcome["price"]))
 
         # Fall back to outcomePrices if available
         if yes_price is None and data.get("outcomePrices"):
             prices = data["outcomePrices"]
-            if len(prices) >= 1:
+            # outcomePrices might be a JSON string or a list
+            if isinstance(prices, str):
+                import json
+                try:
+                    prices = json.loads(prices)
+                except (json.JSONDecodeError, TypeError):
+                    prices = []
+            if isinstance(prices, list) and len(prices) >= 1:
                 yes_price = Decimal(str(prices[0]))
-            if len(prices) >= 2:
+            if isinstance(prices, list) and len(prices) >= 2:
                 no_price = Decimal(str(prices[1]))
 
         # Parse end date
@@ -94,6 +105,24 @@ class PolymarketCollector(BaseCollector):
         elif data.get("resolved"):
             status = "resolved"
 
+        # Construct URL - use multiple fallbacks for reliability
+        # Polymarket URLs use event slugs at /event/{slug} or market-level
+        # slugs. The Gamma API provides both "slug" and "market_slug".
+        slug = data.get("slug") or data.get("market_slug")
+        event_slug = data.get("groupItemTitle") or data.get("eventSlug")
+
+        if event_slug:
+            url = f"https://polymarket.com/event/{event_slug}"
+        elif slug:
+            url = f"https://polymarket.com/event/{slug}"
+        else:
+            # Fall back to condition ID for direct link
+            condition_id = data.get("conditionId", data.get("id", ""))
+            if condition_id:
+                url = f"https://polymarket.com/event?id={condition_id}"
+            else:
+                url = "https://polymarket.com"
+
         return MarketData(
             platform=self.platform_name,
             platform_market_id=data.get("conditionId", data.get("id", "")),
@@ -103,7 +132,7 @@ class PolymarketCollector(BaseCollector):
             category=data.get("category"),
             end_date=end_date,
             status=status,
-            url=f"https://polymarket.com/event/{data.get('slug', data.get('conditionId', ''))}",
+            url=url,
             yes_price=yes_price,
             no_price=no_price,
             total_volume=Decimal(str(data["volume"])) if data.get("volume") else None,
@@ -122,11 +151,16 @@ class PolymarketCollector(BaseCollector):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
     )
-    async def fetch_markets(self, category: Optional[str] = None) -> list[MarketData]:
-        """Fetch all available markets from Polymarket.
+    async def fetch_markets(
+        self,
+        category: Optional[str] = None,
+        max_markets: int = 1000,
+    ) -> list[MarketData]:
+        """Fetch available markets from Polymarket.
 
         Args:
             category: Optional category filter.
+            max_markets: Maximum markets to fetch (default 1000 to avoid overwhelming DB).
 
         Returns:
             List of MarketData objects.
@@ -138,7 +172,7 @@ class PolymarketCollector(BaseCollector):
         offset = 0
         limit = 100
 
-        while True:
+        while len(markets) < max_markets:
             params = {
                 "limit": limit,
                 "offset": offset,
@@ -156,12 +190,22 @@ class PolymarketCollector(BaseCollector):
                 break
 
             for market in data:
+                # Skip if market is a string (just a condition ID) instead of a dict
+                if isinstance(market, str):
+                    continue
+                if not isinstance(market, dict):
+                    continue
+
                 try:
-                    markets.append(self._parse_gamma_market(market))
+                    parsed = self._parse_gamma_market(market)
+                    # Only add markets with valid prices
+                    if parsed.yes_price is not None and parsed.yes_price > 0:
+                        markets.append(parsed)
                 except Exception as e:
+                    market_id = market.get("conditionId", "unknown") if isinstance(market, dict) else str(market)[:20]
                     self.logger.warning(
                         "Failed to parse market",
-                        market_id=market.get("conditionId"),
+                        market_id=market_id,
                         error=str(e),
                     )
 

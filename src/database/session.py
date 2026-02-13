@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -13,14 +14,45 @@ from src.database.models import Base
 
 settings = get_settings()
 
+# SQLite needs special handling for concurrent access
+is_sqlite = "sqlite" in settings.database_url
+
+engine_kwargs = {
+    "echo": settings.log_level == "DEBUG",
+    "pool_pre_ping": True,
+}
+
+if is_sqlite:
+    # SQLite: use NullPool to avoid locking issues with multiple processes
+    from sqlalchemy.pool import StaticPool
+
+    engine_kwargs.update({
+        "connect_args": {"check_same_thread": False, "timeout": 30},
+        "poolclass": StaticPool,
+    })
+else:
+    engine_kwargs.update({
+        "pool_size": 5,
+        "max_overflow": 10,
+    })
+
 # Create async engine
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.log_level == "DEBUG",
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
+    **engine_kwargs,
 )
+
+
+# Enable WAL mode for SQLite (allows concurrent reads + writes)
+if is_sqlite:
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
 
 # Create session factory
 async_session_factory = async_sessionmaker(

@@ -19,9 +19,9 @@ UNIQUE PRICE SOURCES (use these):
    - Auth: None
    - Endpoint: https://www.predictit.org/api/marketdata/all/
 
-4. DraftKings Predictions (Scraping)
+4. DraftKings Predictions (API)
    - Backend: Railbird Exchange (acquired DCM)
-   - Method: Playwright browser automation
+   - Method: Reverse-engineered REST API (no auth, full bid/ask)
    - URL: https://predictions.draftkings.com
 
 5. FanDuel Predicts (Scraping)
@@ -79,10 +79,10 @@ API_COLLECTORS = {
     "kalshi": KalshiCollector,
     "polymarket": PolymarketCollector,
     "predictit": PredictItCollector,
+    "draftkings": DraftKingsCollector,
 }
 
 SCRAPING_COLLECTORS = {
-    "draftkings": DraftKingsCollector,
     "fanduel": FanDuelCollector,
     "ibkr": IBKRCollector,
 }

@@ -129,7 +129,13 @@ class Opportunity(Base):
     )
     opportunity_type: Mapped[str] = mapped_column(
         String(50), default="cross_platform"
-    )  # cross_platform, logical
+    )  # cross_platform, logical, cross_platform_logical
+    opportunity_subtype: Mapped[Optional[str]] = mapped_column(
+        String(50)
+    )  # Detailed subtype (e.g., championship_vs_playoffs, deadline_inconsistency)
+    opportunity_subtype_display: Mapped[Optional[str]] = mapped_column(
+        String(100)
+    )  # Human-readable subtype name
 
     # Platform A details
     platform_a: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -152,6 +158,14 @@ class Opportunity(Base):
     estimated_fees: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     net_profit_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
 
+    # Per-platform fee breakdowns
+    fee_a_entry: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_a_profit: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_a_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_entry: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_profit: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+    fee_b_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
+
     # Status
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, index=True
@@ -165,6 +179,15 @@ class Opportunity(Base):
     user_acted: Mapped[Optional[bool]] = mapped_column(Boolean)
     user_action_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     user_notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Spread persistence tracking
+    first_detected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )  # When this opportunity was first ever seen
+    times_seen: Mapped[int] = mapped_column(default=1)  # How many scans found this
+    spread_persistent: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # True if seen across 3+ scans = structural
 
     # Actual results (if executed)
     position_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
