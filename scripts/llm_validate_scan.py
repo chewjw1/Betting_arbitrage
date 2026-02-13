@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Live scan with LLM validation using Claude Haiku or GPT-4o-mini.
+"""Live scan with LLM validation using GPT-4o-mini or Claude Haiku.
 
 This script fetches markets from public APIs and validates fuzzy matches
 using an LLM to filter false positives.
 
 Usage:
-    ANTHROPIC_API_KEY=sk-ant-... python scripts/llm_validate_scan.py
+    OPENAI_API_KEY=sk-... python scripts/llm_validate_scan.py
 
-    Or with OpenAI:
-    OPENAI_API_KEY=sk-... LLM_PROVIDER=openai python scripts/llm_validate_scan.py
+    Or with Anthropic:
+    ANTHROPIC_API_KEY=sk-ant-... LLM_PROVIDER=anthropic python scripts/llm_validate_scan.py
 """
 
 import asyncio
@@ -39,22 +39,22 @@ class LLMValidator:
     """Simple LLM validator for the standalone script."""
 
     def __init__(self):
-        self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         self.openai_key = os.environ.get("OPENAI_API_KEY", "")
-        self.provider = os.environ.get("LLM_PROVIDER", "anthropic")
+        self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        self.provider = os.environ.get("LLM_PROVIDER", "openai")
         self.cache: dict[str, bool] = {}
         self.calls = 0
         self.rejections = 0
 
-        # Select provider based on available keys
-        if self.provider == "anthropic" and self.anthropic_key:
-            self.model = "claude-3-haiku-20240307"
-        elif self.openai_key:
-            self.provider = "openai"
+        # Select provider based on available keys (OpenAI preferred - cheaper)
+        if self.provider == "openai" and self.openai_key:
             self.model = "gpt-4o-mini"
         elif self.anthropic_key:
             self.provider = "anthropic"
             self.model = "claude-3-haiku-20240307"
+        elif self.openai_key:
+            self.provider = "openai"
+            self.model = "gpt-4o-mini"
         else:
             self.provider = None
             self.model = None

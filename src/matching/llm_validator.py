@@ -1,6 +1,6 @@
 """LLM-based validation for cross-platform market matching.
 
-Uses Claude Haiku or GPT-4o-mini to validate whether two prediction market titles
+Uses GPT-4o-mini or Claude Haiku to validate whether two prediction market titles
 are asking about the same real-world event, filtering out false
 positives from fuzzy matching.
 
@@ -41,15 +41,15 @@ class LLMMatchValidator:
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-3-haiku-20240307",
-        provider: str = "anthropic",
+        model: str = "gpt-4o-mini",
+        provider: str = "openai",
     ):
         """Initialize validator.
 
         Args:
             api_key: API key for the LLM provider.
-            model: Model to use for validation.
-            provider: 'anthropic' for Claude or 'openai' for GPT.
+            model: Model to use for validation (gpt-4o-mini is cheaper).
+            provider: 'openai' for GPT or 'anthropic' for Claude.
         """
         self.model = model
         self.provider = provider

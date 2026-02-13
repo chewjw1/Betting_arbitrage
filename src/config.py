@@ -114,12 +114,12 @@ class Settings(BaseSettings):
         description="Use LLM to validate fuzzy matches. Requires OPENAI_API_KEY or ANTHROPIC_API_KEY.",
     )
     llm_provider: str = Field(
-        default="anthropic",
-        description="LLM provider: 'anthropic' (Claude) or 'openai' (GPT). Anthropic preferred.",
+        default="openai",
+        description="LLM provider: 'openai' (GPT-4o-mini, cheaper) or 'anthropic' (Claude Haiku).",
     )
     llm_model: str = Field(
-        default="claude-3-haiku-20240307",
-        description="Model to use. Anthropic: claude-3-haiku-20240307. OpenAI: gpt-4o-mini.",
+        default="gpt-4o-mini",
+        description="Model: gpt-4o-mini ($0.15/$0.60/M) or claude-3-haiku-20240307 ($0.25/$1.25/M).",
     )
 
     # API Settings
