@@ -106,9 +106,12 @@ class Settings(BaseSettings):
         description="Maximum days until resolution to consider (structural spreads can be longer)",
     )
 
-    # LLM Match Validation (optional - improves match quality)
+    # LLM Match Validation (enabled by default if OPENAI_API_KEY is set)
     openai_api_key: str = Field(default="")
-    llm_validation_enabled: bool = Field(default=False)
+    llm_validation_enabled: bool = Field(
+        default=True,
+        description="Use GPT-4o-mini to validate fuzzy matches. Requires OPENAI_API_KEY.",
+    )
     llm_model: str = Field(default="gpt-4o-mini")
 
     # API Settings

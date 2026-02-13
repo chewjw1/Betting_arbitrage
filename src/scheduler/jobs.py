@@ -1,8 +1,8 @@
 """Scheduled jobs for data collection and arbitrage detection.
 
 This module runs automatic scans at configurable intervals:
-- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 60 seconds (default)
-- Scraping platforms (FanDuel, IBKR): every 180 seconds (default)
+- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 5 minutes (default)
+- Scraping platforms (IBKR): every 10 minutes (default, requires Playwright)
 - Detects both cross-platform AND logical arbitrage
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
 - Sends Discord notifications for opportunities above threshold
@@ -33,7 +33,6 @@ from src.collectors import (
     PolymarketCollector,
     PredictItCollector,
     DraftKingsCollector,
-    FanDuelCollector,
     IBKRCollector,
 )
 from src.collectors.base import MarketData
@@ -250,7 +249,7 @@ class ArbitrageScanner:
         return await self._process_markets(markets_by_platform, start_time, "api")
 
     async def run_scrape_scan(self) -> dict:
-        """Run scan for scraping-based platforms (slow, every 3 min).
+        """Run scan for scraping-based platforms (slow, every 10 min).
 
         Returns:
             Dict with scan results.
@@ -258,9 +257,8 @@ class ArbitrageScanner:
         start_time = time.time()
         self.logger.info("Starting scrape scan")
 
-        # Scraping collectors (DraftKings moved to API scan)
+        # Scraping collectors (only IBKR - FanDuel removed, DraftKings uses API)
         collectors = {
-            "fanduel": FanDuelCollector(),
             "ibkr": IBKRCollector(),
         }
 

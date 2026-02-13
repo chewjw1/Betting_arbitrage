@@ -24,16 +24,20 @@ UNIQUE PRICE SOURCES (use these):
    - Method: Reverse-engineered REST API (no auth, full bid/ask)
    - URL: https://predictions.draftkings.com
 
-5. FanDuel Predicts (Scraping)
-   - Backend: CME Group contracts
-   - Method: Playwright browser automation
-   - URL: https://www.fanduel.com/predicts
-
-6. IBKR ForecastTrader (Scraping)
+5. IBKR ForecastTrader (Scraping or API)
    - Backend: ForecastEx DCM + CME contracts
-   - Method: Playwright browser automation
+   - Method: Client Portal API (requires auth) or Playwright scraping
    - URL: https://forecasttrader.interactivebrokers.com
    - Note: Zero commission!
+
+
+REMOVED SOURCES:
+================
+
+- FanDuel Predicts: Uses CME Group contracts. Removed because:
+  - Requires Playwright scraping (fragile)
+  - Limited state availability (AL, AK, SC, ND, SD)
+  - CME contracts available via IBKR with better API
 
 
 DUPLICATE SOURCES (skip these):
@@ -53,9 +57,8 @@ Cross-Platform (same event, different prices):
 - Kalshi ↔ Polymarket (different user bases)
 - Kalshi ↔ PredictIt (different fee structures)
 - Kalshi ↔ DraftKings (Railbird vs Kalshi exchange)
-- Kalshi ↔ FanDuel (CME vs Kalshi)
-- DraftKings ↔ FanDuel (both retail, different users)
-- Any combination of the 6 unique sources
+- Kalshi ↔ IBKR (ForecastEx vs Kalshi)
+- Any combination of the 5 unique sources
 
 Logical (related events, probability inconsistencies):
 - Within any single platform
@@ -71,7 +74,6 @@ from src.collectors.kalshi import KalshiCollector
 from src.collectors.polymarket import PolymarketCollector
 from src.collectors.predictit import PredictItCollector
 from src.collectors.draftkings import DraftKingsCollector
-from src.collectors.fanduel import FanDuelCollector
 from src.collectors.ibkr import IBKRCollector
 
 # Primary collectors (unique price sources)
@@ -83,7 +85,6 @@ API_COLLECTORS = {
 }
 
 SCRAPING_COLLECTORS = {
-    "fanduel": FanDuelCollector,
     "ibkr": IBKRCollector,
 }
 
@@ -99,7 +100,6 @@ __all__ = [
     "PolymarketCollector",
     "PredictItCollector",
     "DraftKingsCollector",
-    "FanDuelCollector",
     "IBKRCollector",
     "API_COLLECTORS",
     "SCRAPING_COLLECTORS",
