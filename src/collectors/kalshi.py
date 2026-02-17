@@ -1,4 +1,4 @@
-"""Kalshi API collector.
+"""Kalshi API collector with authenticated API support.
 
 Kalshi API Documentation: https://docs.kalshi.com/welcome
 
@@ -7,18 +7,22 @@ Categories (Politics, Economics, Crypto, etc.) live at the Series level.
 The /markets endpoint has NO category filter, so we must:
 1. Fetch series tickers for desired categories via /series
 2. Fetch markets per-series via /markets?series_ticker=X
+
+Authentication uses RSA-PSS per-request signing.
+Without auth: read-only, lower rate limits, public endpoints only.
+With auth: higher rate limits, order book access, trading.
 """
 
 import asyncio
+import base64
 import re
+import time
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.collectors.base import BaseCollector, MarketData
@@ -41,6 +45,10 @@ class KalshiCollector(BaseCollector):
     Fetches markets from configured categories (Politics, Economics, Crypto, etc.)
     by first discovering series tickers, then fetching markets per-series.
     This avoids the sports flood that dominates the unfiltered /markets endpoint.
+
+    Supports both authenticated and unauthenticated modes:
+    - Unauthenticated: read-only, lower rate limits
+    - Authenticated: higher rate limits, order book depth, trading access
     """
 
     platform_name = "kalshi"
@@ -49,18 +57,36 @@ class KalshiCollector(BaseCollector):
         super().__init__()
         self.settings = get_settings()
         self.client: Optional[httpx.AsyncClient] = None
-        self.token: Optional[str] = None
-        self.token_expires: Optional[datetime] = None
-        self._private_key: Optional[rsa.RSAPrivateKey] = None
+        self._private_key = None
+        self._api_key: str = self.settings.kalshi_api_key
+        self._authenticated: bool = False
 
     async def connect(self) -> None:
-        """Initialize HTTP client."""
+        """Initialize HTTP client and authenticate if credentials available."""
         self.client = httpx.AsyncClient(
             base_url=self.settings.kalshi_api_host,
             timeout=30.0,
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        self.logger.info("Connected to Kalshi API (read-only)")
+
+        # Try to set up authentication
+        if self._api_key:
+            try:
+                self._load_private_key()
+                self._authenticated = True
+                self.logger.info("Kalshi API authenticated (RSA-PSS signing enabled)")
+            except FileNotFoundError as e:
+                self.logger.warning(
+                    "Kalshi private key not found, running unauthenticated",
+                    error=str(e),
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Kalshi authentication setup failed, running unauthenticated",
+                    error=str(e),
+                )
+        else:
+            self.logger.info("Kalshi API connected (unauthenticated, read-only)")
 
     async def disconnect(self) -> None:
         """Close HTTP client."""
@@ -68,61 +94,102 @@ class KalshiCollector(BaseCollector):
             await self.client.aclose()
             self.client = None
 
-    def _load_private_key(self) -> rsa.RSAPrivateKey:
+    def _load_private_key(self) -> None:
         """Load RSA private key from file."""
-        if self._private_key is None:
-            key_path = Path(self.settings.kalshi_private_key_path)
-            if not key_path.exists():
-                raise FileNotFoundError(
-                    f"Kalshi private key not found at {key_path}. "
-                    "Generate an API key at https://kalshi.com and download the private key."
-                )
-            with open(key_path, "rb") as f:
-                self._private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None,
-                )
-        return self._private_key
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-    )
-    async def _authenticate(self) -> None:
-        """Authenticate with Kalshi API using RSA signature."""
-        if not self.settings.kalshi_api_key:
-            self.logger.warning("No Kalshi API key configured, running in read-only mode")
+        if self._private_key is not None:
             return
 
-        import base64
-        import time
+        from cryptography.hazmat.primitives import serialization
 
-        timestamp = str(int(time.time() * 1000))
-        method = "GET"
-        path = "/trade-api/v2/portfolio/balance"
+        key_path = Path(self.settings.kalshi_private_key_path)
+        if not key_path.exists():
+            raise FileNotFoundError(
+                f"Kalshi private key not found at {key_path}. "
+                "Generate an API key at https://kalshi.com and download the private key."
+            )
+        with open(key_path, "rb") as f:
+            self._private_key = serialization.load_pem_private_key(
+                f.read(),
+                password=None,
+            )
 
-        message = f"{timestamp}{method}{path}"
-        private_key = self._load_private_key()
+    def _sign_request(self, method: str, path: str) -> dict[str, str]:
+        """Create signed headers for an authenticated Kalshi API request.
 
-        signature = private_key.sign(
+        Per Kalshi docs, the message to sign is:
+            {timestamp_ms}{HTTP_METHOD}{path_without_query_params}
+
+        Uses RSA-PSS with SHA256 and DIGEST_LENGTH salt.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            path: Request path (query params will be stripped).
+
+        Returns:
+            Dict of authentication headers.
+        """
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        timestamp_ms = str(int(time.time() * 1000))
+
+        # Strip query parameters from path for signing
+        path_no_query = path.split("?")[0]
+
+        message = f"{timestamp_ms}{method.upper()}{path_no_query}"
+
+        signature = self._private_key.sign(
             message.encode(),
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=padding.PSS.DIGEST_LENGTH,
             ),
             hashes.SHA256(),
         )
         signature_b64 = base64.b64encode(signature).decode()
 
-        self.client.headers.update(
-            {
-                "KALSHI-ACCESS-KEY": self.settings.kalshi_api_key,
-                "KALSHI-ACCESS-SIGNATURE": signature_b64,
-                "KALSHI-ACCESS-TIMESTAMP": timestamp,
-            }
-        )
+        return {
+            "KALSHI-ACCESS-KEY": self._api_key,
+            "KALSHI-ACCESS-SIGNATURE": signature_b64,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        }
 
-        self.logger.info("Authenticated with Kalshi API")
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+    ) -> httpx.Response:
+        """Make an API request, with authentication if available.
+
+        Args:
+            method: HTTP method.
+            path: API path.
+            params: Query parameters.
+            json: JSON body for POST/PUT.
+
+        Returns:
+            httpx.Response
+        """
+        headers = {}
+        if self._authenticated:
+            # Build full path with query params for the URL, but sign without them
+            full_path = path
+            if params:
+                query_string = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
+                if query_string:
+                    full_path = f"{path}?{query_string}"
+            headers = self._sign_request(method, path)
+
+        response = await self.client.request(
+            method=method,
+            url=path,
+            params=params,
+            json=json,
+            headers=headers,
+        )
+        return response
 
     async def _fetch_series_for_category(self, category: str) -> list[str]:
         """Fetch all series tickers for a given category.
@@ -134,7 +201,8 @@ class KalshiCollector(BaseCollector):
             List of series ticker strings.
         """
         try:
-            response = await self.client.get(
+            response = await self._request(
+                "GET",
                 "/trade-api/v2/series",
                 params={"category": category},
             )
@@ -262,6 +330,7 @@ class KalshiCollector(BaseCollector):
             no_bid=Decimal(str(data["no_bid"])) / 100 if data.get("no_bid") else None,
             no_ask=Decimal(str(data["no_ask"])) / 100 if data.get("no_ask") else None,
             total_volume=Decimal(str(data["volume"])) if data.get("volume") else None,
+            open_interest=Decimal(str(data["open_interest"])) if data.get("open_interest") else None,
         )
 
     async def _fetch_markets_for_series(
@@ -290,7 +359,7 @@ class KalshiCollector(BaseCollector):
                 params["cursor"] = cursor
 
             try:
-                response = await self.client.get("/trade-api/v2/markets", params=params)
+                response = await self._request("GET", "/trade-api/v2/markets", params=params)
                 response.raise_for_status()
                 retries_on_429 = 0  # Reset on success
             except httpx.HTTPStatusError as e:
@@ -397,11 +466,13 @@ class KalshiCollector(BaseCollector):
             )
 
         # Step 2: Fetch markets per-series with concurrency control
+        # Authenticated users get higher rate limits
+        concurrency = 10 if self._authenticated else 5
         markets = []
         series_with_markets = 0
         api_calls = 0
         new_active_series: set[str] = set()
-        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent requests
+        semaphore = asyncio.Semaphore(concurrency)
         stop_flag = False
 
         async def fetch_one(ticker: str) -> tuple[str, list[MarketData]]:
@@ -410,7 +481,8 @@ class KalshiCollector(BaseCollector):
                 if stop_flag:
                     return ticker, []
                 # Small delay to spread requests
-                await asyncio.sleep(0.25)
+                delay = 0.15 if self._authenticated else 0.25
+                await asyncio.sleep(delay)
                 api_calls += 1
                 result = await self._fetch_markets_for_series(
                     ticker, max_per_series=200
@@ -455,6 +527,7 @@ class KalshiCollector(BaseCollector):
         self.logger.info(
             "Fetched markets from Kalshi",
             count=len(markets),
+            authenticated=self._authenticated,
             series_checked=min(len(series_tickers), api_calls),
             series_with_markets=series_with_markets,
             api_calls=api_calls,
@@ -472,7 +545,7 @@ class KalshiCollector(BaseCollector):
             raise RuntimeError("Collector not connected. Call connect() first.")
 
         try:
-            response = await self.client.get(f"/trade-api/v2/markets/{market_id}")
+            response = await self._request("GET", f"/trade-api/v2/markets/{market_id}")
             response.raise_for_status()
             data = response.json()
             return self._parse_market(data.get("market", data))
@@ -482,10 +555,67 @@ class KalshiCollector(BaseCollector):
             raise
 
     async def fetch_orderbook(self, market_id: str) -> dict:
-        """Fetch orderbook for a specific market."""
+        """Fetch orderbook for a specific market.
+
+        Returns order book with bids and asks, each containing
+        price (in cents) and quantity.
+
+        Args:
+            market_id: Market ticker.
+
+        Returns:
+            Dict with 'yes' and 'no' keys, each containing
+            list of [price, quantity] entries.
+        """
         if not self.client:
             raise RuntimeError("Collector not connected. Call connect() first.")
 
-        response = await self.client.get(f"/trade-api/v2/markets/{market_id}/orderbook")
+        response = await self._request("GET", f"/trade-api/v2/markets/{market_id}/orderbook")
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        # Parse into standardized format
+        orderbook = data.get("orderbook", data)
+        return {
+            "yes_bids": [(entry[0], entry[1]) for entry in orderbook.get("yes", []) if len(entry) >= 2],
+            "no_bids": [(entry[0], entry[1]) for entry in orderbook.get("no", []) if len(entry) >= 2],
+        }
+
+    async def fetch_market_with_depth(self, market_id: str) -> Optional[MarketData]:
+        """Fetch a market and enrich with order book depth data.
+
+        Fetches both market data and order book, then populates
+        the depth fields (yes_ask_size, etc.) for slippage estimation.
+
+        Args:
+            market_id: Market ticker.
+
+        Returns:
+            MarketData with depth fields populated, or None.
+        """
+        market = await self.fetch_market(market_id)
+        if not market:
+            return None
+
+        try:
+            book = await self.fetch_orderbook(market_id)
+
+            # Best ask = lowest price someone is selling at
+            # For YES: look at yes_bids (they sell, you buy)
+            # Kalshi orderbook: "yes" array has bids for YES contracts
+            yes_bids = book.get("yes_bids", [])
+            no_bids = book.get("no_bids", [])
+
+            if yes_bids:
+                # Best YES ask size (top of book)
+                best = yes_bids[0]
+                market.yes_ask_size = Decimal(str(best[1]))
+
+            if no_bids:
+                best = no_bids[0]
+                market.no_ask_size = Decimal(str(best[1]))
+
+        except Exception as e:
+            self.logger.debug("Order book fetch failed", market_id=market_id, error=str(e))
+
+        return market

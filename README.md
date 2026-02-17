@@ -141,15 +141,14 @@ src/
 ## TODO / Roadmap
 
 ### High Priority
+- [ ] **LLM Validation Test** - Add OPENAI_API_KEY, run `python scripts/llm_validate_scan.py` to measure false positive rate
 - [ ] **Discord Integration Testing** - Verify reaction handling (✅/❌) updates opportunity status in database
 - [ ] **Dashboard Review** - Confirm opportunities display with market URLs for quick execution
-- [ ] **Kalshi Authenticated API** - Add RSA key auth for full market access and better rate limits
 
 ### Medium Priority
 - [ ] **IBKR ForecastTrader API** - Implement Client Portal API (requires IBKR account)
   - Zero commission = great for small spreads
   - Endpoint: `GET /v1/api/trsrv/event/category-tree`
-- [ ] **Better fee modeling** - Add slippage estimation based on order book depth
 - [ ] **Historical analysis** - Price movement patterns to identify best scan times
 
 ### Nice to Have
@@ -159,8 +158,9 @@ src/
 
 ### Completed
 - [x] Multi-platform API collectors (Kalshi, Polymarket, PredictIt, DraftKings)
+- [x] Kalshi authenticated API with RSA-PSS per-request signing
 - [x] LLM validation for cross-platform matching (GPT-4o-mini with persistent caching)
-- [x] Fee-aware arbitrage calculations
+- [x] Fee-aware arbitrage calculations with slippage estimation
 - [x] Discord notifications with deduplication
 - [x] Web dashboard with auto-refresh
 - [x] Persistent LLM cache to avoid re-validating same pairs

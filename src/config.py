@@ -52,17 +52,8 @@ class Settings(BaseSettings):
     # PredictIt API
     predictit_api_host: str = Field(default="https://www.predictit.org")
 
-    # DraftKings (scraping)
+    # DraftKings API
     draftkings_base_url: str = Field(default="https://predictions.draftkings.com")
-    apify_api_token: str = Field(default="", description="Apify API token for DraftKings scraping")
-
-    # FanDuel (scraping)
-    fanduel_base_url: str = Field(default="https://www.fanduel.com/predicts")
-
-    # Interactive Brokers
-    ibkr_username: str = Field(default="")
-    ibkr_password: str = Field(default="")
-    ibkr_account_id: str = Field(default="")
 
     # Discord
     discord_bot_token: str = Field(default="")
@@ -81,14 +72,6 @@ class Settings(BaseSettings):
     api_poll_interval_seconds: int = Field(
         default=600,
         description="How often to poll API-based platforms (10 min default, allows LLM validation to complete)",
-    )
-    scrape_poll_interval_seconds: int = Field(
-        default=600,
-        description="How often to poll scraping-based platforms (DraftKings, FanDuel, IBKR)",
-    )
-    enable_scrapers: bool = Field(
-        default=False,
-        description="Enable browser-based scrapers (DraftKings, FanDuel, IBKR). Requires Playwright.",
     )
     # Deduplication: How long to suppress repeat notifications for same opportunity (seconds)
     notification_cooldown_seconds: int = Field(
