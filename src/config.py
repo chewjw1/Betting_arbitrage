@@ -83,6 +83,16 @@ class Settings(BaseSettings):
         default=0.65,
         description="Minimum fuzzy match confidence for cross-platform market pairing",
     )
+    # Logical arbitrage detection
+    min_logical_violation_pct: float = Field(
+        default=1.5,
+        description="Minimum constraint violation percentage for logical arbitrage alerts",
+    )
+    # Spread persistence: how many scans before marking as structural
+    spread_persistence_threshold: int = Field(
+        default=3,
+        description="Number of scans an opportunity must persist before marking as structural",
+    )
     # Resolution window
     max_days_to_resolution: int = Field(
         default=180,

@@ -142,7 +142,7 @@ src/
 
 ### High Priority
 - [ ] **LLM Validation Test** - Add OPENAI_API_KEY, run `python scripts/llm_validate_scan.py` to measure false positive rate
-- [ ] **Discord Integration Testing** - Verify reaction handling (✅/❌) updates opportunity status in database
+- [ ] **End-to-End Test** - Run scheduler + Discord bot together, verify opportunities appear in Discord
 - [ ] **Dashboard Review** - Confirm opportunities display with market URLs for quick execution
 
 ### Medium Priority
@@ -161,9 +161,11 @@ src/
 - [x] Kalshi authenticated API with RSA-PSS per-request signing
 - [x] LLM validation for cross-platform matching (GPT-4o-mini with persistent caching)
 - [x] Fee-aware arbitrage calculations with slippage estimation
-- [x] Discord notifications with deduplication
+- [x] Discord notifications via Redis pub/sub (scheduler → Redis → Discord bot)
+- [x] Discord reaction handling (✅/❌) updates opportunity status in database
 - [x] Web dashboard with auto-refresh
 - [x] Persistent LLM cache to avoid re-validating same pairs
+- [x] Configurable thresholds (logical violation %, spread persistence, etc.)
 
 ## Development
 

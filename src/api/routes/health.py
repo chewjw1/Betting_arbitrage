@@ -31,10 +31,8 @@ class DataSourceStatus(BaseModel):
 
 class ScanStatus(BaseModel):
     """Status of the last scan."""
-    last_api_scan: Optional[datetime] = None
-    last_scrape_scan: Optional[datetime] = None
-    api_markets_count: int = 0
-    scrape_markets_count: int = 0
+    last_scan: Optional[datetime] = None
+    markets_count: int = 0
     opportunities_found: int = 0
 
 
@@ -59,14 +57,8 @@ def update_scan_status(
     global _scan_status
 
     total_markets = sum(len(m) for m in markets_by_platform.values())
-
-    if scan_type == "api":
-        _scan_status.last_api_scan = datetime.utcnow()
-        _scan_status.api_markets_count = total_markets
-    else:
-        _scan_status.last_scrape_scan = datetime.utcnow()
-        _scan_status.scrape_markets_count = total_markets
-
+    _scan_status.last_scan = datetime.utcnow()
+    _scan_status.markets_count = total_markets
     _scan_status.opportunities_found = opportunities_found
 
 
@@ -74,33 +66,24 @@ async def get_scan_status_from_db(session: AsyncSession) -> ScanStatus:
     """Derive scan status from the database (works across processes)."""
     scan_status = ScanStatus()
 
-    api_platforms = ["kalshi", "polymarket", "predictit"]
-    scrape_platforms = ["draftkings", "fanduel", "ibkr"]
+    all_platforms = ["kalshi", "polymarket", "predictit", "draftkings"]
 
-    for platform_list, is_api in [(api_platforms, True), (scrape_platforms, False)]:
-        # Count total markets from these platforms
-        count_query = (
-            select(func.count(Market.id))
-            .where(Market.platform.in_(platform_list))
-        )
-        result = await session.execute(count_query)
-        count = result.scalar() or 0
+    # Count total markets
+    count_query = (
+        select(func.count(Market.id))
+        .where(Market.platform.in_(all_platforms))
+    )
+    result = await session.execute(count_query)
+    scan_status.markets_count = result.scalar() or 0
 
-        # Get last price update time for these platforms
-        last_price_query = (
-            select(func.max(Price.timestamp))
-            .join(Market, Price.market_id == Market.id)
-            .where(Market.platform.in_(platform_list))
-        )
-        last_price_result = await session.execute(last_price_query)
-        last_price_time = last_price_result.scalar()
-
-        if is_api:
-            scan_status.api_markets_count = count
-            scan_status.last_api_scan = last_price_time
-        else:
-            scan_status.scrape_markets_count = count
-            scan_status.last_scrape_scan = last_price_time
+    # Get last price update time
+    last_price_query = (
+        select(func.max(Price.timestamp))
+        .join(Market, Price.market_id == Market.id)
+        .where(Market.platform.in_(all_platforms))
+    )
+    last_price_result = await session.execute(last_price_query)
+    scan_status.last_scan = last_price_result.scalar()
 
     # Count recent opportunities (last 24h)
     opp_query = (
@@ -258,7 +241,7 @@ async def check_scraper_status_from_db(
             status="disabled",
             last_check=datetime.utcnow(),
             markets_count=0,
-            error="No data collected (requires Playwright browser)",
+            error="No data collected yet",
         )
 
     # If last update was more than 10 minutes ago, mark as stale
@@ -307,10 +290,9 @@ async def get_health_status(
         else:
             data_sources.append(check)
 
-    # Add scraper status from database
-    for scraper in ["draftkings", "fanduel", "ibkr"]:
-        scraper_status = await check_scraper_status_from_db(scraper, session)
-        data_sources.append(scraper_status)
+    # Add DraftKings status from database
+    dk_status = await check_scraper_status_from_db("draftkings", session)
+    data_sources.append(dk_status)
 
     # Get scan status from database
     scan_status = await get_scan_status_from_db(session)
@@ -346,9 +328,7 @@ async def get_sources_quick(
 
     return {
         "timestamp": datetime.utcnow().isoformat(),
-        "last_api_scan": scan_status.last_api_scan.isoformat() if scan_status.last_api_scan else None,
-        "last_scrape_scan": scan_status.last_scrape_scan.isoformat() if scan_status.last_scrape_scan else None,
-        "api_markets": scan_status.api_markets_count,
-        "scrape_markets": scan_status.scrape_markets_count,
+        "last_scan": scan_status.last_scan.isoformat() if scan_status.last_scan else None,
+        "markets_count": scan_status.markets_count,
         "opportunities_found": scan_status.opportunities_found,
     }

@@ -1,18 +1,18 @@
 """Scheduled jobs for data collection and arbitrage detection.
 
 This module runs automatic scans at configurable intervals:
-- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 5 minutes (default)
+- API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 10 minutes (default)
 - Detects both cross-platform AND logical arbitrage
 - Uses LLM validation to filter false positive matches (if OPENAI_API_KEY set)
 - Deduplicates notifications (won't re-alert for same pair within cooldown)
-- Sends Discord notifications for opportunities above threshold
+- Publishes opportunities to Redis for Discord bot delivery
 - Stores opportunities in database for dashboard viewing
 
 Usage:
     python -m src.scheduler.jobs
 
 Or via Docker:
-    docker-compose up scheduler
+    docker-compose up collector
 """
 
 import asyncio
@@ -44,6 +44,7 @@ from src.database import (
     Price,
 )
 from src.database.price_history import log_all_prices
+from src.notifications.redis_bridge import OpportunityPublisher
 
 logger = structlog.get_logger()
 
@@ -140,16 +141,16 @@ class ArbitrageScanner:
 
     def __init__(
         self,
-        discord_bot=None,
+        publisher: Optional[OpportunityPublisher] = None,
         min_net_spread_pct: Optional[float] = None,
     ):
         """Initialize scanner.
 
         Args:
-            discord_bot: Optional Discord bot for notifications.
+            publisher: Redis publisher for sending opportunities to Discord bot.
             min_net_spread_pct: Override minimum profit threshold.
         """
-        self.discord_bot = discord_bot
+        self.publisher = publisher
         self.min_net_spread_pct = min_net_spread_pct or settings.min_net_spread_pct
         self.logger = logger.bind(component="ArbitrageScanner")
         self._scan_count = 0  # Track scans for periodic price history logging
@@ -179,9 +180,9 @@ class ArbitrageScanner:
 
         # Logical arbitrage detector
         self.logical_detector = LogicalArbitrageDetector(
-            min_violation_pct=1.5,
+            min_violation_pct=settings.min_logical_violation_pct,
             min_net_profit_pct=self.min_net_spread_pct,
-            min_relationship_confidence=0.65,
+            min_relationship_confidence=settings.min_match_confidence,
         )
 
     async def _collect_from_platform(
@@ -268,23 +269,25 @@ class ArbitrageScanner:
             position_size=Decimal(str(settings.max_position_size)),
         )
 
-        # Store opportunities in database and notify
+        # Store opportunities in database and publish to Redis for Discord
         notifications_sent = 0
 
         for opp in cross_platform_opps:
             opportunity_id = await self._store_opportunity(opp, "cross_platform")
 
-            # Check deduplication before notifying
-            if self.discord_bot and opportunity_id and self.deduplicator.should_notify(opp):
-                await self.discord_bot.send_opportunity(opp, opportunity_id)
+            # Check deduplication before publishing
+            if opportunity_id and self.deduplicator.should_notify(opp):
+                if self.publisher:
+                    await self.publisher.publish(opp, opportunity_id, "cross_platform")
                 self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
 
         for opp in logical_opps:
             opportunity_id = await self._store_logical_opportunity(opp)
 
-            if self.discord_bot and opportunity_id and self.deduplicator.should_notify(opp):
-                await self._send_logical_notification(opp, opportunity_id)
+            if opportunity_id and self.deduplicator.should_notify(opp):
+                if self.publisher:
+                    await self.publisher.publish(opp, opportunity_id, "logical")
                 self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
 
@@ -378,7 +381,7 @@ class ArbitrageScanner:
                     opportunity.position_size = result.position_size
                     opportunity.detected_at = datetime.utcnow()
                     opportunity.times_seen = (opportunity.times_seen or 1) + 1
-                    if opportunity.times_seen >= 3:
+                    if opportunity.times_seen >= settings.spread_persistence_threshold:
                         opportunity.spread_persistent = True
                 else:
                     # Create new opportunity
@@ -446,7 +449,7 @@ class ArbitrageScanner:
                     opportunity.net_profit_pct = result.net_profit_pct
                     opportunity.detected_at = datetime.utcnow()
                     opportunity.times_seen = (opportunity.times_seen or 1) + 1
-                    if opportunity.times_seen >= 3:
+                    if opportunity.times_seen >= settings.spread_persistence_threshold:
                         opportunity.spread_persistent = True
                 else:
                     # Create new
@@ -479,59 +482,41 @@ class ArbitrageScanner:
                 self.logger.error("Failed to store logical opportunity", error=str(e))
                 return None
 
-    async def _send_logical_notification(self, result, opportunity_id: str) -> None:
-        """Send Discord notification for logical arbitrage."""
-        if not self.discord_bot or not self.discord_bot.alert_channel:
-            return
-
-        rel = result.relationship
-        embed_content = (
-            f"**Logical Arbitrage: {rel.relationship_type.value}**\n\n"
-            f"Market: {rel.market_a.title[:100]}\n"
-            f"Platform: {rel.market_a.platform}\n"
-            f"Constraint: {rel.expected_constraint}\n"
-            f"Violation: {float(result.violation_amount):.2%}\n"
-            f"Net Profit: {float(result.net_profit_pct):.2f}%\n\n"
-            f"Action: {result.recommended_action or 'See details'}\n"
-            f"ID: {opportunity_id}"
-        )
-
-        try:
-            message = await self.discord_bot.alert_channel.send(embed_content)
-            await message.add_reaction("✅")
-            await message.add_reaction("❌")
-            self.discord_bot.pending_notifications[message.id] = opportunity_id
-        except Exception as e:
-            self.logger.error("Failed to send logical notification", error=str(e))
-
-
 # Global scanner instance
 _scanner: Optional[ArbitrageScanner] = None
+_publisher: Optional[OpportunityPublisher] = None
 
 
 async def run_scan():
     """Run scan (called every interval)."""
-    global _scanner
+    global _scanner, _publisher
     if _scanner is None:
-        _scanner = ArbitrageScanner()
+        _publisher = OpportunityPublisher()
+        await _publisher.connect()
+        _scanner = ArbitrageScanner(publisher=_publisher)
     await _scanner.run_scan()
 
 
 async def main():
     """Main entry point for the scheduler.
 
-    Runs scans at configurable intervals (default 5 minutes).
+    Runs scans at configurable intervals (default 10 minutes).
     All platforms are API-based - no browser scraping required.
+    Publishes opportunities to Redis for the Discord bot to deliver.
     """
-    global _scanner
+    global _scanner, _publisher
 
     logger.info("Initializing arbitrage scanner scheduler")
 
     # Initialize database
     await init_db()
 
-    # Create scanner
-    _scanner = ArbitrageScanner()
+    # Initialize Redis publisher for Discord notifications
+    _publisher = OpportunityPublisher()
+    await _publisher.connect()
+
+    # Create scanner with publisher
+    _scanner = ArbitrageScanner(publisher=_publisher)
 
     logger.info(
         "Scanner configured",
@@ -539,6 +524,7 @@ async def main():
         notification_cooldown=settings.notification_cooldown_seconds,
         min_profit_threshold=settings.min_net_spread_pct,
         llm_validation=settings.llm_validation_enabled and bool(settings.openai_api_key),
+        redis_notifications=True,
     )
 
     # Create scheduler
@@ -571,6 +557,8 @@ async def main():
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
+        if _publisher:
+            await _publisher.close()
         logger.info("Scheduler stopped")
 
 

@@ -1,20 +1,135 @@
-"""Discord bot for arbitrage notifications."""
+"""Discord bot for arbitrage notifications.
+
+Subscribes to Redis pub/sub for opportunities published by the scheduler,
+sends rich embed notifications to Discord, and handles user reactions
+(✅ acted, ❌ passed) by updating the database.
+
+Architecture:
+    Scheduler (jobs.py) --[Redis pub/sub]--> Discord Bot --[Discord API]--> User
+    User --[reaction]--> Discord Bot --[DB write]--> Opportunity.user_acted
+"""
 
 import asyncio
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 import uuid
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
+from sqlalchemy import select
 import structlog
 
 from src.arbitrage.calculator import ArbitrageResult
+from src.collectors.base import MarketData
 from src.config import get_settings
-from src.notifications.formatters import format_opportunity_embed, format_summary_message
+from src.database import async_session_factory, init_db, Opportunity
+from src.notifications.formatters import format_opportunity_embed
+from src.notifications.redis_bridge import OpportunitySubscriber
 
 logger = structlog.get_logger()
+
+
+def _rebuild_result_from_data(data: dict) -> tuple[Optional[ArbitrageResult], Optional[discord.Embed]]:
+    """Rebuild an ArbitrageResult from Redis data for embed formatting.
+
+    Args:
+        data: Dict from Redis with opportunity data.
+
+    Returns:
+        Tuple of (ArbitrageResult, None) for cross-platform,
+        or (None, Embed) for logical (built manually).
+    """
+    opp_type = data.get("type", "cross_platform")
+
+    if opp_type == "cross_platform":
+        ma = data["market_a"]
+        mb = data["market_b"]
+
+        market_a = MarketData(
+            platform=ma["platform"],
+            platform_market_id=ma["platform_market_id"],
+            title=ma["title"],
+            url=ma.get("url"),
+            yes_price=Decimal(ma["yes_price"]) if ma.get("yes_price") else None,
+            no_price=Decimal(ma["no_price"]) if ma.get("no_price") else None,
+        )
+        market_b = MarketData(
+            platform=mb["platform"],
+            platform_market_id=mb["platform_market_id"],
+            title=mb["title"],
+            url=mb.get("url"),
+            yes_price=Decimal(mb["yes_price"]) if mb.get("yes_price") else None,
+            no_price=Decimal(mb["no_price"]) if mb.get("no_price") else None,
+        )
+
+        result = ArbitrageResult(
+            market_a=market_a,
+            market_b=market_b,
+            side_a=data["side_a"],
+            side_b=data["side_b"],
+            price_a=Decimal(data["price_a"]),
+            price_b=Decimal(data["price_b"]),
+            gross_spread=Decimal(data["gross_spread"]),
+            gross_profit=Decimal(data["gross_profit"]),
+            total_fees=Decimal(data["total_fees"]),
+            net_profit=Decimal(data["net_profit"]),
+            net_profit_pct=Decimal(data["net_profit_pct"]),
+            is_profitable=data.get("is_profitable", True),
+            position_size=Decimal(data["position_size"]),
+            notes=data.get("notes"),
+            slippage_warning=data.get("slippage_warning"),
+            effective_net_profit_pct=Decimal(data["effective_net_profit_pct"]) if data.get("effective_net_profit_pct") else None,
+        )
+        return result, None
+
+    elif opp_type == "logical":
+        # Build a simple embed for logical opportunities
+        ma = data["market_a"]
+        mb = data.get("market_b", ma)
+        net_pct = data.get("net_profit_pct", "0")
+
+        embed = discord.Embed(
+            title=f":brain: Logical Arbitrage: {net_pct}% Net Profit",
+            color=discord.Color.purple(),
+            timestamp=datetime.utcnow(),
+        )
+
+        if data.get("subtype_display"):
+            embed.description = f"**Type:** {data['subtype_display']}"
+
+        embed.add_field(
+            name=f":one: {ma['platform'].title()}",
+            value=f"**Market:** {ma['title'][:100]}\n[View Market]({ma['url']})" if ma.get("url") else f"**Market:** {ma['title'][:100]}",
+            inline=False,
+        )
+
+        if mb["platform_market_id"] != ma["platform_market_id"]:
+            embed.add_field(
+                name=f":two: {mb['platform'].title()}",
+                value=f"**Market:** {mb['title'][:100]}\n[View Market]({mb['url']})" if mb.get("url") else f"**Market:** {mb['title'][:100]}",
+                inline=False,
+            )
+
+        embed.add_field(
+            name=":bar_chart: Analysis",
+            value=(
+                f"**Constraint:** {data.get('expected_constraint', 'N/A')}\n"
+                f"**Violation:** {data.get('violation_amount', 'N/A')}\n"
+                f"**Net Profit:** {net_pct}%\n"
+                f"**Action:** {data.get('recommended_action', 'See details')}"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(
+            text=f"React with \u2705 if you acted on this, \u274c if you passed | ID: {data['opportunity_id'][:8]}"
+        )
+
+        return None, embed
+
+    return None, None
 
 
 class ArbitrageBot(commands.Bot):
@@ -38,8 +153,9 @@ class ArbitrageBot(commands.Bot):
         # Track sent notifications for reaction handling
         self.pending_notifications: dict[int, str] = {}  # message_id -> opportunity_id
 
-        # Callback for opportunity updates
-        self.on_user_response: Optional[callable] = None
+        # Redis subscriber for receiving opportunities from scheduler
+        self._subscriber: Optional[OpportunitySubscriber] = None
+        self._listener_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self):
         """Called when the bot is starting up."""
@@ -75,8 +191,84 @@ class ArbitrageBot(commands.Bot):
                     channel_id=self.settings.discord_channel_id,
                 )
 
+        # Start Redis listener for opportunities
+        if self._listener_task is None or self._listener_task.done():
+            self._listener_task = asyncio.create_task(self._redis_listener())
+            self.logger.info("Started Redis opportunity listener")
+
+    async def _redis_listener(self):
+        """Background task: subscribe to Redis and forward opportunities to Discord."""
+        self._subscriber = OpportunitySubscriber()
+
+        while True:
+            try:
+                await self._subscriber.connect()
+                self.logger.info("Redis subscriber connected, listening for opportunities...")
+
+                async for opp_data in self._subscriber.listen():
+                    await self._handle_opportunity(opp_data)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error("Redis listener error, reconnecting in 5s", error=str(e))
+                await asyncio.sleep(5)
+            finally:
+                if self._subscriber:
+                    try:
+                        await self._subscriber.close()
+                    except Exception:
+                        pass
+
+    async def _handle_opportunity(self, data: dict):
+        """Process an opportunity received from Redis and send to Discord.
+
+        Args:
+            data: Deserialized opportunity dict from Redis.
+        """
+        if not self.alert_channel:
+            self.logger.warning("No alert channel set, dropping opportunity")
+            return
+
+        opportunity_id = data.get("opportunity_id", str(uuid.uuid4()))
+
+        try:
+            result, embed = _rebuild_result_from_data(data)
+
+            if result is not None:
+                # Cross-platform: use the rich formatter
+                embed = format_opportunity_embed(result, opportunity_id)
+
+            if embed is None:
+                self.logger.error("Failed to build embed for opportunity", data=data)
+                return
+
+            message = await self.alert_channel.send(embed=embed)
+            await message.add_reaction("\u2705")
+            await message.add_reaction("\u274c")
+
+            # Track for reaction handling
+            self.pending_notifications[message.id] = opportunity_id
+
+            self.logger.info(
+                "Opportunity sent to Discord",
+                opportunity_id=opportunity_id,
+                message_id=message.id,
+                opp_type=data.get("type", "unknown"),
+            )
+
+        except Exception as e:
+            self.logger.error(
+                "Failed to send opportunity to Discord",
+                opportunity_id=opportunity_id,
+                error=str(e),
+            )
+
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        """Handle reaction adds for opportunity responses."""
+        """Handle reaction adds for opportunity responses.
+
+        Updates the Opportunity record in the database with user_acted status.
+        """
         # Ignore bot's own reactions
         if payload.user_id == self.user.id:
             return
@@ -89,27 +281,49 @@ class ArbitrageBot(commands.Bot):
         emoji = str(payload.emoji)
 
         response = None
-        if emoji == "✅":
+        if emoji == "\u2705":
             response = "acted"
-        elif emoji == "❌":
+        elif emoji == "\u274c":
             response = "passed"
 
-        if response and self.on_user_response:
-            await self.on_user_response(
+        if not response:
+            return
+
+        # Update database
+        try:
+            async with async_session_factory() as session:
+                query = select(Opportunity).where(
+                    Opportunity.id == opportunity_id,
+                )
+                result = await session.execute(query)
+                opportunity = result.scalar_one_or_none()
+
+                if opportunity:
+                    opportunity.user_acted = (response == "acted")
+                    opportunity.user_action_at = datetime.utcnow()
+                    opportunity.user_notes = f"Discord reaction by user {payload.user_id}"
+                    await session.commit()
+
+                    self.logger.info(
+                        "User response recorded in database",
+                        opportunity_id=opportunity_id,
+                        response=response,
+                        user_id=payload.user_id,
+                    )
+                else:
+                    self.logger.warning(
+                        "Opportunity not found in database",
+                        opportunity_id=opportunity_id,
+                    )
+        except Exception as e:
+            self.logger.error(
+                "Failed to update opportunity in database",
                 opportunity_id=opportunity_id,
-                response=response,
-                user_id=payload.user_id,
+                error=str(e),
             )
 
-            self.logger.info(
-                "User response recorded",
-                opportunity_id=opportunity_id,
-                response=response,
-                user_id=payload.user_id,
-            )
-
-            # Remove from pending
-            del self.pending_notifications[message_id]
+        # Remove from pending
+        del self.pending_notifications[message_id]
 
     async def send_opportunity(
         self,
@@ -117,7 +331,7 @@ class ArbitrageBot(commands.Bot):
         opportunity_id: Optional[str] = None,
         channel: Optional[discord.TextChannel] = None,
     ) -> Optional[discord.Message]:
-        """Send an opportunity notification.
+        """Send an opportunity notification directly (for /test command).
 
         Args:
             result: ArbitrageResult to send.
@@ -140,8 +354,8 @@ class ArbitrageBot(commands.Bot):
             message = await target_channel.send(embed=embed)
 
             # Add reaction options
-            await message.add_reaction("✅")
-            await message.add_reaction("❌")
+            await message.add_reaction("\u2705")
+            await message.add_reaction("\u274c")
 
             # Track for response handling
             self.pending_notifications[message.id] = opportunity_id
@@ -163,32 +377,17 @@ class ArbitrageBot(commands.Bot):
             )
             return None
 
-    async def send_scan_summary(
-        self,
-        opportunities: list[ArbitrageResult],
-        scan_time_seconds: float,
-        channel: Optional[discord.TextChannel] = None,
-    ) -> Optional[discord.Message]:
-        """Send a summary of a scan.
-
-        Args:
-            opportunities: List of opportunities found.
-            scan_time_seconds: Time taken for the scan.
-            channel: Channel to send to.
-
-        Returns:
-            Sent message or None if failed.
-        """
-        target_channel = channel or self.alert_channel
-        if not target_channel:
-            return None
-
-        try:
-            content = format_summary_message(opportunities, scan_time_seconds)
-            return await target_channel.send(content)
-        except Exception as e:
-            self.logger.error("Failed to send summary", error=str(e))
-            return None
+    async def close(self):
+        """Clean up resources on shutdown."""
+        if self._listener_task and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+        if self._subscriber:
+            await self._subscriber.close()
+        await super().close()
 
 
 class ArbitrageCog(commands.Cog):
@@ -225,6 +424,13 @@ class ArbitrageCog(commands.Cog):
             inline=True,
         )
 
+        redis_status = "Connected" if (self.bot._subscriber and self.bot._subscriber._redis) else "Disconnected"
+        embed.add_field(
+            name="Redis",
+            value=redis_status,
+            inline=True,
+        )
+
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="threshold", description="View or set minimum profit threshold")
@@ -258,9 +464,6 @@ class ArbitrageCog(commands.Cog):
     @app_commands.command(name="test", description="Send a test notification")
     async def test_notification(self, interaction: discord.Interaction):
         """Send a test notification."""
-        from decimal import Decimal
-        from src.collectors.base import MarketData
-
         # Create dummy data
         market_a = MarketData(
             platform="kalshi",
@@ -320,8 +523,8 @@ class ArbitrageCog(commands.Cog):
         `/help` - Show this help message
 
         **Reactions:**
-        ✅ - Mark that you acted on an opportunity
-        ❌ - Mark that you passed on an opportunity
+        \u2705 - Mark that you acted on an opportunity
+        \u274c - Mark that you passed on an opportunity
         """
 
         embed.add_field(name="Commands", value=commands_text, inline=False)
@@ -330,12 +533,15 @@ class ArbitrageCog(commands.Cog):
 
 
 async def run_bot():
-    """Run the Discord bot."""
+    """Run the Discord bot with Redis subscription."""
     settings = get_settings()
 
     if not settings.discord_bot_token:
         logger.error("DISCORD_BOT_TOKEN not configured")
         return
+
+    # Initialize database (for reaction -> DB writes)
+    await init_db()
 
     bot = ArbitrageBot()
 
