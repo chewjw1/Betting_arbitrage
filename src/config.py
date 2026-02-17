@@ -112,7 +112,7 @@ class Settings(BaseSettings):
 
     # API Settings
     api_host: str = Field(default="0.0.0.0")
-    api_port: int = Field(default=8000)
+    api_port: int = Field(default=44495)
 
     # Logging
     log_level: str = Field(default="INFO")

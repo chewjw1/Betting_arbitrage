@@ -72,9 +72,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: betting_arbitrage_api
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 44495
     ports:
-      - "8000:8000"
+      - "44495:44495"
     environment:
       - DATABASE_URL=postgresql+asyncpg://betting:betting_password@db:5432/betting_arbitrage
       - REDIS_URL=redis://redis:6379/0

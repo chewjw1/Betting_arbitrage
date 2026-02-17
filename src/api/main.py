@@ -10,7 +10,6 @@ from fastapi.responses import HTMLResponse
 import structlog
 
 from src.api.routes import markets, opportunities, stats, health
-from src.api.schemas import HealthResponse
 from src.config import get_settings
 from src.database import init_db
 
@@ -42,7 +41,11 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=[
+        "http://jfk21.phoebe.usbx.me:44495",
+        "https://jfk21.phoebe.usbx.me:44495",
+        "http://localhost:44495",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,21 +78,14 @@ async def api_root():
     }
 
 
-@app.get("/health", response_model=HealthResponse, tags=["health"])
+@app.get("/health", tags=["health"])
 async def health_check():
-    """Health check endpoint."""
-    # TODO: Add actual health checks for database, redis, and collectors
-    return HealthResponse(
-        status="healthy",
-        database="connected",
-        redis="connected",
-        collectors={
-            "kalshi": "ok",
-            "polymarket": "ok",
-            "predictit": "ok",
-        },
-        timestamp=datetime.utcnow(),
-    )
+    """Quick health check. For detailed status, use /api/v1/health/status."""
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "detail": "Use /api/v1/health/status for full platform health",
+    }
 
 
 def run_api():

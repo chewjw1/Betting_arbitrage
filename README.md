@@ -50,7 +50,7 @@ A system for detecting arbitrage opportunities across prediction markets (Kalshi
    python -m src.api.main  # Dashboard API
    ```
 
-4. **Access the dashboard**: http://localhost:8000/docs
+4. **Access the dashboard**: http://jfk21.phoebe.usbx.me:44495/docs
 
 ## Configuration
 
@@ -64,7 +64,7 @@ Key environment variables in `.env`:
 | `DISCORD_CHANNEL_ID` | Channel ID for alerts | Required for alerts |
 | `MIN_NET_SPREAD_PCT` | Minimum net profit % to alert | `1.0` |
 | `MAX_POSITION_SIZE` | Max $ per side | `500` |
-| `POLL_INTERVAL_SECONDS` | Scan frequency | `30` |
+| `API_POLL_INTERVAL_SECONDS` | Scan frequency | `600` (10 min) |
 
 ## Platform Status
 
