@@ -303,6 +303,79 @@
             text-decoration: underline;
         }
 
+        /* Expandable detail row */
+        .opportunities-table tr.opp-row {
+            cursor: pointer;
+        }
+        .opportunities-table tr.opp-row:hover {
+            background: #1d1f23;
+        }
+        .detail-row td {
+            padding: 0 !important;
+            border-bottom: 1px solid #2f3336;
+        }
+        .detail-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease, padding 0.3s ease;
+            padding: 0 16px;
+            background: #1a1c20;
+        }
+        .detail-row.expanded .detail-content {
+            max-height: 500px;
+            padding: 16px;
+        }
+        .action-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .action-step {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            background: #16181c;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+        }
+        .step-number {
+            background: #1d9bf0;
+            color: #fff;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .step-text {
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .step-text strong {
+            color: #00ba7c;
+        }
+        .step-text a {
+            color: #1d9bf0;
+            text-decoration: none;
+        }
+        .step-text a:hover {
+            text-decoration: underline;
+        }
+        .action-summary {
+            font-size: 12px;
+            color: #71767b;
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: #16181c;
+            border-radius: 6px;
+            border-left: 3px solid #00ba7c;
+        }
+
         /* Filters */
         .filters {
             display: flex;
@@ -512,6 +585,68 @@
             return '';
         }
 
+        function toggleDetail(id) {
+            const row = document.getElementById(id);
+            if (row) {
+                row.classList.toggle('expanded');
+            }
+        }
+
+        function buildActionSteps(opp) {
+            const priceA = formatPrice(opp.price_a);
+            const priceB = formatPrice(opp.price_b);
+            const sideA = (opp.side_a || 'yes').toUpperCase();
+            const sideB = (opp.side_b || 'no').toUpperCase();
+            const platA = (opp.platform_a || '').charAt(0).toUpperCase() + (opp.platform_a || '').slice(1);
+            const platB = (opp.platform_b || '').charAt(0).toUpperCase() + (opp.platform_b || '').slice(1);
+            const titleA = opp.market_a_title || 'Market A';
+            const titleB = opp.market_b_title || 'Market B';
+            const urlA = opp.market_a_url;
+            const urlB = opp.market_b_url;
+            const netPct = parseFloat(opp.net_profit_pct).toFixed(2);
+            const posSize = opp.position_size ? `$${parseFloat(opp.position_size).toFixed(0)}` : '$500';
+            const isLogical = (opp.opportunity_type || '').includes('logical');
+            const isSameMarket = opp.platform_a === opp.platform_b;
+
+            let steps = '';
+            let summary = '';
+
+            if (isSameMarket && isLogical) {
+                // Logical arbitrage on same platform (complement: buy YES + NO)
+                const marketLink = urlA ? `<a href="${urlA}" target="_blank" onclick="event.stopPropagation()">${platA}</a>` : platA;
+                steps += `
+                    <div class="action-step">
+                        <span class="step-number">1</span>
+                        <span class="step-text">Buy <strong>${sideA}</strong> at <strong>${priceA}</strong> on ${marketLink}</span>
+                    </div>
+                    <div class="action-step">
+                        <span class="step-number">2</span>
+                        <span class="step-text">Buy <strong>${sideB}</strong> at <strong>${priceB}</strong> on ${marketLink}</span>
+                    </div>`;
+                const totalCost = (parseFloat(opp.price_a) + parseFloat(opp.price_b)).toFixed(2);
+                summary = `Total cost: $${totalCost} per share pair. Guaranteed payout: $1.00. Net profit: ${netPct}% after fees.`;
+            } else {
+                // Cross-platform: buy on two different platforms
+                const linkA = urlA ? `<a href="${urlA}" target="_blank" onclick="event.stopPropagation()">${platA}</a>` : platA;
+                const linkB = urlB ? `<a href="${urlB}" target="_blank" onclick="event.stopPropagation()">${platB}</a>` : platB;
+                steps += `
+                    <div class="action-step">
+                        <span class="step-number">1</span>
+                        <span class="step-text">Buy <strong>${sideA}</strong> at <strong>${priceA}</strong> on ${linkA}<br>
+                            <span style="color:#71767b;font-size:11px;">${titleA.substring(0, 80)}</span></span>
+                    </div>
+                    <div class="action-step">
+                        <span class="step-number">2</span>
+                        <span class="step-text">Buy <strong>${sideB}</strong> at <strong>${priceB}</strong> on ${linkB}<br>
+                            <span style="color:#71767b;font-size:11px;">${titleB.substring(0, 80)}</span></span>
+                    </div>`;
+                summary = `Position size: ${posSize} per side. Net profit: ${netPct}% after fees across both platforms.`;
+            }
+
+            steps += `<div class="action-summary">${summary}</div>`;
+            return steps;
+        }
+
         async function fetchHealth() {
             try {
                 const response = await fetch(`${API_BASE}/api/v1/health/status`);
@@ -610,7 +745,7 @@
                 return;
             }
 
-            tbody.innerHTML = filtered.map(opp => {
+            tbody.innerHTML = filtered.map((opp, idx) => {
                 const grossPct = parseFloat(opp.gross_spread) * 100;
                 const netPct = parseFloat(opp.net_profit_pct);
                 const totalFees = parseFloat(opp.estimated_fees) * 100;
@@ -638,8 +773,11 @@
                 // Subtype display
                 const subtypeDisplay = opp.opportunity_subtype_display || opp.opportunity_subtype || '';
 
+                // Build actionable instructions
+                const actionSteps = buildActionSteps(opp);
+
                 return `
-                    <tr data-type="${opp.opportunity_type}">
+                    <tr class="opp-row" data-type="${opp.opportunity_type}" onclick="toggleDetail('detail-${idx}')">
                         <td>
                             <div>${formatTime(opp.detected_at)}</div>
                             <div class="time-ago">${timeAgo(opp.detected_at)}</div>
@@ -660,7 +798,7 @@
                                     </div>
                                 </div>
                                 ${opp.market_a_url ?
-                                    `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="${opp.market_a_title || ''}">${opp.market_a_title || 'View Market'}</a>` :
+                                    `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="${opp.market_a_title || ''}" onclick="event.stopPropagation()">${opp.market_a_title || 'View Market'}</a>` :
                                     `<span class="market-title" title="${opp.market_a_title || ''}">${opp.market_a_title || '-'}</span>`
                                 }
                                 ${feeDetailsA}
@@ -677,7 +815,7 @@
                                         </div>
                                     </div>
                                     ${opp.market_a_url ?
-                                        `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="View on ${opp.platform_a}">View on ${opp.platform_a}</a>` : ''
+                                        `<a href="${opp.market_a_url}" target="_blank" class="market-link market-title" title="View on ${opp.platform_a}" onclick="event.stopPropagation()">View on ${opp.platform_a}</a>` : ''
                                     }` :
                                     `<div class="platform-row">
                                         <span class="platform-tag ${getPlatformClass(opp.platform_b)}">${opp.platform_b}</span>
@@ -687,7 +825,7 @@
                                         </div>
                                     </div>
                                     ${opp.market_b_url ?
-                                        `<a href="${opp.market_b_url}" target="_blank" class="market-link market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || 'View Market'}</a>` :
+                                        `<a href="${opp.market_b_url}" target="_blank" class="market-link market-title" title="${opp.market_b_title || ''}" onclick="event.stopPropagation()">${opp.market_b_title || 'View Market'}</a>` :
                                         `<span class="market-title" title="${opp.market_b_title || ''}">${opp.market_b_title || '-'}</span>`
                                     }`
                                 }
@@ -704,6 +842,13 @@
                             ${opp.user_acted === true ? '<span style="color: #00ba7c;">Acted</span>' :
                               opp.user_acted === false ? '<span style="color: #71767b;">Passed</span>' :
                               '<span style="color: #f59e0b;">Pending</span>'}
+                        </td>
+                    </tr>
+                    <tr class="detail-row" id="detail-${idx}">
+                        <td colspan="8">
+                            <div class="detail-content">
+                                <div class="action-steps">${actionSteps}</div>
+                            </div>
                         </td>
                     </tr>
                 `;

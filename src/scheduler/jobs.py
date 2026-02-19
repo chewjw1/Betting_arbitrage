@@ -4,8 +4,8 @@ This module runs automatic scans at configurable intervals:
 - API platforms (Kalshi, Polymarket, PredictIt, DraftKings): every 10 minutes (default)
 - Detects both cross-platform AND logical arbitrage
 - Uses LLM validation to filter false positive matches (if OPENAI_API_KEY set)
-- Deduplicates notifications (won't re-alert for same pair within cooldown)
-- Publishes opportunities to Redis for Discord bot delivery
+- Only notifies Discord for NEW opportunities (permanent deduplication via database)
+- Publishes opportunities to Redis/queue for Discord bot delivery
 - Stores opportunities in database for dashboard viewing
 
 Usage:
@@ -16,7 +16,7 @@ Or via Docker:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 import time
 from typing import Optional
@@ -57,85 +57,6 @@ except ImportError:
 settings = get_settings()
 
 
-class NotificationDeduplicator:
-    """Track recently notified opportunities to avoid spam."""
-
-    def __init__(self, cooldown_seconds: int = 300):
-        """Initialize deduplicator.
-
-        Args:
-            cooldown_seconds: Don't re-notify for same pair within this window.
-        """
-        self.cooldown_seconds = cooldown_seconds
-        # Key: "platform_a:market_id_a:platform_b:market_id_b" -> last_notified_time
-        self._notified: dict[str, datetime] = {}
-        self.logger = logger.bind(component="Deduplicator")
-
-    def _make_key(self, opp) -> str:
-        """Create a unique key for an opportunity."""
-        if hasattr(opp, 'market_a'):
-            # Cross-platform ArbitrageResult
-            parts = sorted([
-                f"{opp.market_a.platform}:{opp.market_a.platform_market_id}",
-                f"{opp.market_b.platform}:{opp.market_b.platform_market_id}",
-            ])
-        elif hasattr(opp, 'relationship'):
-            # LogicalArbitrageResult
-            rel = opp.relationship
-            parts = [
-                f"{rel.market_a.platform}:{rel.market_a.platform_market_id}",
-                f"{rel.relationship_type.value}",
-            ]
-            if rel.market_b.platform_market_id != rel.market_a.platform_market_id:
-                parts.append(f"{rel.market_b.platform}:{rel.market_b.platform_market_id}")
-        else:
-            return str(hash(str(opp)))
-
-        return ":".join(parts)
-
-    def should_notify(self, opp) -> bool:
-        """Check if we should send a notification for this opportunity.
-
-        Args:
-            opp: ArbitrageResult or LogicalArbitrageResult.
-
-        Returns:
-            True if we should notify, False if recently notified.
-        """
-        key = self._make_key(opp)
-        now = datetime.utcnow()
-
-        # Clean up old entries
-        self._cleanup()
-
-        if key in self._notified:
-            last_notified = self._notified[key]
-            age = (now - last_notified).total_seconds()
-            if age < self.cooldown_seconds:
-                self.logger.debug(
-                    "Skipping duplicate notification",
-                    key=key,
-                    age_seconds=age,
-                )
-                return False
-
-        return True
-
-    def mark_notified(self, opp) -> None:
-        """Mark an opportunity as notified."""
-        key = self._make_key(opp)
-        self._notified[key] = datetime.utcnow()
-        self.logger.debug("Marked as notified", key=key)
-
-    def _cleanup(self) -> None:
-        """Remove expired entries."""
-        now = datetime.utcnow()
-        cutoff = now - timedelta(seconds=self.cooldown_seconds * 2)
-        expired = [k for k, v in self._notified.items() if v < cutoff]
-        for k in expired:
-            del self._notified[k]
-
-
 class ArbitrageScanner:
     """Main scanner that coordinates data collection and arbitrage detection."""
 
@@ -154,11 +75,6 @@ class ArbitrageScanner:
         self.min_net_spread_pct = min_net_spread_pct or settings.min_net_spread_pct
         self.logger = logger.bind(component="ArbitrageScanner")
         self._scan_count = 0  # Track scans for periodic price history logging
-
-        # Deduplicator for notifications
-        self.deduplicator = NotificationDeduplicator(
-            cooldown_seconds=settings.notification_cooldown_seconds
-        )
 
         # LLM validator for cross-platform matching (optional)
         llm_validator = None
@@ -269,29 +185,27 @@ class ArbitrageScanner:
             position_size=Decimal(str(settings.max_position_size)),
         )
 
-        # Store opportunities in database and publish to Redis for Discord
+        # Store opportunities in database and publish to Discord only for NEW ones
         notifications_sent = 0
         notifications_skipped = 0
 
         for opp in cross_platform_opps:
-            opportunity_id = await self._store_opportunity(opp, "cross_platform")
+            opportunity_id, is_new = await self._store_opportunity(opp, "cross_platform")
 
-            # Check deduplication before publishing (skip if recently notified)
-            if opportunity_id and self.deduplicator.should_notify(opp):
+            # Only notify on first detection — never re-alert for existing opportunities
+            if opportunity_id and is_new:
                 if self.publisher:
                     await self.publisher.publish(opp, opportunity_id, "cross_platform")
-                self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
             elif opportunity_id:
                 notifications_skipped += 1
 
         for opp in logical_opps:
-            opportunity_id = await self._store_logical_opportunity(opp)
+            opportunity_id, is_new = await self._store_logical_opportunity(opp)
 
-            if opportunity_id and self.deduplicator.should_notify(opp):
+            if opportunity_id and is_new:
                 if self.publisher:
                     await self.publisher.publish(opp, opportunity_id, "logical")
-                self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
             elif opportunity_id:
                 notifications_skipped += 1
@@ -354,11 +268,14 @@ class ArbitrageScanner:
         self,
         result: ArbitrageResult,
         opportunity_type: str = "cross_platform",
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], bool]:
         """Store or update a cross-platform opportunity in the database.
 
         If the same opportunity (same markets) already exists and is active,
         updates it instead of creating a duplicate.
+
+        Returns:
+            Tuple of (opportunity_id, is_new) — is_new is True only for first detection.
         """
         async with async_session_factory() as session:
             try:
@@ -375,6 +292,8 @@ class ArbitrageScanner:
                 )
                 existing_result = await session.execute(existing_query)
                 opportunity = existing_result.scalar_one_or_none()
+
+                is_new = opportunity is None
 
                 if opportunity:
                     # Update existing opportunity - track persistence
@@ -413,14 +332,18 @@ class ArbitrageScanner:
                     session.add(opportunity)
 
                 await session.commit()
-                return str(opportunity.id)
+                return str(opportunity.id), is_new
 
             except Exception as e:
                 self.logger.error("Failed to store opportunity", error=str(e))
-                return None
+                return None, False
 
-    async def _store_logical_opportunity(self, result) -> Optional[str]:
-        """Store or update a logical arbitrage opportunity in the database."""
+    async def _store_logical_opportunity(self, result) -> tuple[Optional[str], bool]:
+        """Store or update a logical arbitrage opportunity in the database.
+
+        Returns:
+            Tuple of (opportunity_id, is_new) — is_new is True only for first detection.
+        """
         async with async_session_factory() as session:
             try:
                 rel = result.relationship
@@ -446,6 +369,8 @@ class ArbitrageScanner:
                 )
                 existing_result = await session.execute(existing_query)
                 opportunity = existing_result.scalar_one_or_none()
+
+                is_new = opportunity is None
 
                 if opportunity:
                     # Update existing
@@ -483,11 +408,11 @@ class ArbitrageScanner:
                     session.add(opportunity)
 
                 await session.commit()
-                return str(opportunity.id)
+                return str(opportunity.id), is_new
 
             except Exception as e:
                 self.logger.error("Failed to store logical opportunity", error=str(e))
-                return None
+                return None, False
 
 # Global scanner instance
 _scanner: Optional[ArbitrageScanner] = None
