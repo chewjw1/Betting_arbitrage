@@ -75,8 +75,8 @@ class Settings(BaseSettings):
     )
     # Deduplication: How long to suppress repeat notifications for same opportunity (seconds)
     notification_cooldown_seconds: int = Field(
-        default=600,
-        description="Don't re-notify for same market pair within this window (10 min default)",
+        default=3600,
+        description="Don't re-notify for same market pair within this window (1 hour default)",
     )
     # Matching confidence threshold
     min_match_confidence: float = Field(

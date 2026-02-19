@@ -271,16 +271,19 @@ class ArbitrageScanner:
 
         # Store opportunities in database and publish to Redis for Discord
         notifications_sent = 0
+        notifications_skipped = 0
 
         for opp in cross_platform_opps:
             opportunity_id = await self._store_opportunity(opp, "cross_platform")
 
-            # Check deduplication before publishing
+            # Check deduplication before publishing (skip if recently notified)
             if opportunity_id and self.deduplicator.should_notify(opp):
                 if self.publisher:
                     await self.publisher.publish(opp, opportunity_id, "cross_platform")
                 self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
+            elif opportunity_id:
+                notifications_skipped += 1
 
         for opp in logical_opps:
             opportunity_id = await self._store_logical_opportunity(opp)
@@ -290,6 +293,8 @@ class ArbitrageScanner:
                     await self.publisher.publish(opp, opportunity_id, "logical")
                 self.deduplicator.mark_notified(opp)
                 notifications_sent += 1
+            elif opportunity_id:
+                notifications_skipped += 1
 
         scan_time = time.time() - start_time
 
@@ -303,6 +308,7 @@ class ArbitrageScanner:
             cross_platform_found=len(cross_platform_opps),
             logical_found=len(logical_opps),
             notifications_sent=notifications_sent,
+            notifications_skipped=notifications_skipped,
             total_markets=sum(len(m) for m in markets_by_platform.values()),
         )
 
@@ -310,6 +316,7 @@ class ArbitrageScanner:
             "cross_platform": cross_platform_opps,
             "logical": logical_opps,
             "notifications_sent": notifications_sent,
+            "notifications_skipped": notifications_skipped,
             "scan_time_seconds": scan_time,
             "markets_by_platform": {
                 p: len(m) for p, m in markets_by_platform.items()

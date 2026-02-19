@@ -291,6 +291,24 @@ class KalshiCollector(BaseCollector):
 
         return False
 
+    @staticmethod
+    def _build_kalshi_url(data: dict[str, Any]) -> str:
+        """Build a working Kalshi market URL.
+
+        Kalshi URLs follow the pattern: /markets/{series}/{slug}/{event}
+        Since we don't have the slug, we use the event page which shows all outcomes.
+        """
+        event_ticker = data.get("event_ticker", "")
+        ticker = data.get("ticker", "")
+
+        if event_ticker:
+            # Use the events path which reliably shows the market
+            return f"https://kalshi.com/events/{event_ticker}"
+        elif ticker:
+            # Fallback to market ticker
+            return f"https://kalshi.com/events/{ticker}"
+        return "https://kalshi.com/markets"
+
     def _parse_market(self, data: dict[str, Any]) -> MarketData:
         """Parse Kalshi API market response into MarketData."""
         yes_price = None
@@ -332,7 +350,7 @@ class KalshiCollector(BaseCollector):
             category=data.get("category"),
             end_date=end_date,
             status=data.get("status", "open"),
-            url=f"https://kalshi.com/markets/{data.get('event_ticker', data.get('ticker', '')).lower()}",
+            url=self._build_kalshi_url(data),
             yes_price=yes_price,
             no_price=no_price,
             yes_bid=Decimal(str(data["yes_bid"])) / 100 if data.get("yes_bid") else None,
