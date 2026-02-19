@@ -3,7 +3,12 @@
 Lazy imports to avoid requiring discord.py when only using Redis bridge.
 """
 
-from src.notifications.redis_bridge import OpportunityPublisher, OpportunitySubscriber
+from src.notifications.redis_bridge import (
+    InProcessPublisher,
+    InProcessSubscriber,
+    OpportunityPublisher,
+    OpportunitySubscriber,
+)
 
 
 def __getattr__(name):

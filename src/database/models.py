@@ -13,8 +13,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -31,7 +31,7 @@ class Market(Base):
     __table_args__ = (UniqueConstraint("platform", "platform_market_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     platform_market_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -62,10 +62,10 @@ class Price(Base):
     __tablename__ = "prices"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     market_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("markets.id"), nullable=False, index=True
+        Uuid, ForeignKey("markets.id"), nullable=False, index=True
     )
     yes_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
     no_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4))
@@ -90,13 +90,13 @@ class MatchedMarket(Base):
     __tablename__ = "matched_markets"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     market_a_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("markets.id"), nullable=False
+        Uuid, ForeignKey("markets.id"), nullable=False
     )
     market_b_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("markets.id"), nullable=False
+        Uuid, ForeignKey("markets.id"), nullable=False
     )
     match_confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=0)
     match_method: Mapped[str] = mapped_column(String(50), default="automatic")
@@ -122,10 +122,10 @@ class Opportunity(Base):
     __tablename__ = "opportunities"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     matched_market_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("matched_markets.id")
+        Uuid, ForeignKey("matched_markets.id")
     )
     opportunity_type: Mapped[str] = mapped_column(
         String(50), default="cross_platform"
@@ -140,7 +140,7 @@ class Opportunity(Base):
     # Platform A details
     platform_a: Mapped[str] = mapped_column(String(50), nullable=False)
     market_a_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("markets.id"), nullable=False
+        Uuid, ForeignKey("markets.id"), nullable=False
     )
     side_a: Mapped[str] = mapped_column(String(10), nullable=False)  # yes or no
     price_a: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
@@ -148,7 +148,7 @@ class Opportunity(Base):
     # Platform B details
     platform_b: Mapped[str] = mapped_column(String(50), nullable=False)
     market_b_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("markets.id"), nullable=False
+        Uuid, ForeignKey("markets.id"), nullable=False
     )
     side_b: Mapped[str] = mapped_column(String(10), nullable=False)
     price_b: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
@@ -218,7 +218,7 @@ class PriceHistory(Base):
     __tablename__ = "price_history"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     platform_market_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -250,10 +250,10 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     opportunity_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("opportunities.id"), nullable=False
+        Uuid, ForeignKey("opportunities.id"), nullable=False
     )
     discord_message_id: Mapped[Optional[str]] = mapped_column(String(50))
     sent_at: Mapped[datetime] = mapped_column(
@@ -283,7 +283,7 @@ class LLMValidationCache(Base):
     __tablename__ = "llm_validation_cache"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid, primary_key=True, default=uuid.uuid4
     )
     # SHA256 hash of sorted, normalized title pair
     cache_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)

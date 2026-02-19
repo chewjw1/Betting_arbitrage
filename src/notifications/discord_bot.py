@@ -26,7 +26,7 @@ from src.collectors.base import MarketData
 from src.config import get_settings
 from src.database import async_session_factory, init_db, Opportunity
 from src.notifications.formatters import format_opportunity_embed
-from src.notifications.redis_bridge import OpportunitySubscriber
+from src.notifications.redis_bridge import InProcessSubscriber, OpportunitySubscriber
 
 logger = structlog.get_logger()
 
@@ -135,7 +135,13 @@ def _rebuild_result_from_data(data: dict) -> tuple[Optional[ArbitrageResult], Op
 class ArbitrageBot(commands.Bot):
     """Discord bot for prediction market arbitrage alerts."""
 
-    def __init__(self):
+    def __init__(self, subscriber=None):
+        """Initialize the bot.
+
+        Args:
+            subscriber: Optional pre-configured subscriber (InProcessSubscriber
+                        or OpportunitySubscriber). If None, creates a Redis subscriber.
+        """
         intents = discord.Intents.default()
         intents.message_content = True
         intents.reactions = True
@@ -153,8 +159,9 @@ class ArbitrageBot(commands.Bot):
         # Track sent notifications for reaction handling
         self.pending_notifications: dict[int, str] = {}  # message_id -> opportunity_id
 
-        # Redis subscriber for receiving opportunities from scheduler
-        self._subscriber: Optional[OpportunitySubscriber] = None
+        # Subscriber for receiving opportunities (Redis or in-process queue)
+        self._external_subscriber = subscriber
+        self._subscriber = None
         self._listener_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self):
@@ -197,13 +204,17 @@ class ArbitrageBot(commands.Bot):
             self.logger.info("Started Redis opportunity listener")
 
     async def _redis_listener(self):
-        """Background task: subscribe to Redis and forward opportunities to Discord."""
-        self._subscriber = OpportunitySubscriber()
+        """Background task: subscribe and forward opportunities to Discord."""
+        # Use external subscriber (in-process queue) or create Redis one
+        if self._external_subscriber:
+            self._subscriber = self._external_subscriber
+        else:
+            self._subscriber = OpportunitySubscriber()
 
         while True:
             try:
                 await self._subscriber.connect()
-                self.logger.info("Redis subscriber connected, listening for opportunities...")
+                self.logger.info("Subscriber connected, listening for opportunities...")
 
                 async for opp_data in self._subscriber.listen():
                     await self._handle_opportunity(opp_data)
@@ -211,10 +222,10 @@ class ArbitrageBot(commands.Bot):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error("Redis listener error, reconnecting in 5s", error=str(e))
+                self.logger.error("Subscriber error, reconnecting in 5s", error=str(e))
                 await asyncio.sleep(5)
             finally:
-                if self._subscriber:
+                if self._subscriber and not self._external_subscriber:
                     try:
                         await self._subscriber.close()
                     except Exception:

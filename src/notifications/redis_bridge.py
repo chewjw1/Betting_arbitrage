@@ -1,31 +1,26 @@
-"""Redis pub/sub bridge for cross-process notification delivery.
+"""Notification bridge for delivering opportunities from scanner to Discord bot.
 
-The scheduler (collector) and Discord bot run as separate processes.
-This module provides the communication layer between them:
+Supports two modes:
+1. Redis pub/sub (multi-process: separate scheduler + Discord bot containers)
+2. In-process asyncio.Queue (single-process: seedbox / simple deployment)
 
-- Scheduler publishes opportunities to Redis channel "arb:opportunities"
-- Discord bot subscribes and sends Discord messages
-- Discord bot publishes user reactions to Redis channel "arb:reactions"
-- Scheduler (or bot) updates the database with user responses
-
-Uses JSON serialization over Redis pub/sub for simplicity and reliability.
+The scanner publishes opportunities; the Discord bot consumes them.
 """
 
+import asyncio
 import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-import redis.asyncio as aioredis
 import structlog
 
 from src.config import get_settings
 
 logger = structlog.get_logger()
 
-# Redis channels
+# Redis channels (only used in Redis mode)
 CHANNEL_OPPORTUNITIES = "arb:opportunities"
-CHANNEL_REACTIONS = "arb:reactions"
 
 
 class DecimalEncoder(json.JSONEncoder):
@@ -53,8 +48,8 @@ def _serialize_market(market) -> dict:
     }
 
 
-def serialize_opportunity(opp, opportunity_id: str, opp_type: str = "cross_platform") -> str:
-    """Serialize an arbitrage opportunity for Redis transport.
+def build_opportunity_data(opp, opportunity_id: str, opp_type: str = "cross_platform") -> dict:
+    """Build opportunity data dict from an ArbitrageResult or LogicalArbitrageResult.
 
     Args:
         opp: ArbitrageResult or LogicalArbitrageResult.
@@ -62,7 +57,7 @@ def serialize_opportunity(opp, opportunity_id: str, opp_type: str = "cross_platf
         opp_type: Type of opportunity.
 
     Returns:
-        JSON string.
+        Dict with opportunity data.
     """
     if hasattr(opp, "market_a"):
         # Cross-platform ArbitrageResult
@@ -109,37 +104,76 @@ def serialize_opportunity(opp, opportunity_id: str, opp_type: str = "cross_platf
         }
 
     data["published_at"] = datetime.utcnow().isoformat()
-    return json.dumps(data, cls=DecimalEncoder)
+    return data
+
+
+def serialize_opportunity(opp, opportunity_id: str, opp_type: str = "cross_platform") -> str:
+    """Serialize to JSON string (for Redis transport)."""
+    return json.dumps(build_opportunity_data(opp, opportunity_id, opp_type), cls=DecimalEncoder)
 
 
 def deserialize_opportunity(json_str: str) -> dict:
-    """Deserialize an opportunity from Redis.
-
-    Args:
-        json_str: JSON string from Redis.
-
-    Returns:
-        Dict with opportunity data.
-    """
+    """Deserialize from JSON string (for Redis transport)."""
     return json.loads(json_str)
 
 
-class OpportunityPublisher:
-    """Publishes opportunities to Redis (used by scheduler/scanner).
+# ---------------------------------------------------------------------------
+# In-process queue (single-process mode, no Redis needed)
+# ---------------------------------------------------------------------------
 
-    Usage:
-        publisher = OpportunityPublisher()
-        await publisher.connect()
-        await publisher.publish(opp, opportunity_id)
-        await publisher.close()
-    """
+class InProcessPublisher:
+    """Publishes opportunities via asyncio.Queue (same process)."""
+
+    def __init__(self, queue: asyncio.Queue):
+        self._queue = queue
+        self.logger = logger.bind(component="InProcessPublisher")
+
+    async def connect(self):
+        pass
+
+    async def close(self):
+        pass
+
+    async def publish(self, opp, opportunity_id: str, opp_type: str = "cross_platform") -> int:
+        data = build_opportunity_data(opp, opportunity_id, opp_type)
+        await self._queue.put(data)
+        self.logger.debug("Published opportunity (in-process)", opportunity_id=opportunity_id)
+        return 1
+
+
+class InProcessSubscriber:
+    """Subscribes to opportunities via asyncio.Queue (same process)."""
+
+    def __init__(self, queue: asyncio.Queue):
+        self._queue = queue
+        self._redis = None  # Compatibility with status check in discord_bot
+        self.logger = logger.bind(component="InProcessSubscriber")
+
+    async def connect(self):
+        self.logger.info("In-process subscriber ready")
+
+    async def close(self):
+        pass
+
+    async def listen(self):
+        while True:
+            data = await self._queue.get()
+            yield data
+
+
+# ---------------------------------------------------------------------------
+# Redis pub/sub (multi-process mode)
+# ---------------------------------------------------------------------------
+
+class OpportunityPublisher:
+    """Publishes opportunities to Redis (used by scheduler/scanner)."""
 
     def __init__(self):
-        self._redis: Optional[aioredis.Redis] = None
+        self._redis = None
         self.logger = logger.bind(component="OpportunityPublisher")
 
     async def connect(self):
-        """Connect to Redis."""
+        import redis.asyncio as aioredis
         settings = get_settings()
         self._redis = aioredis.from_url(
             settings.redis_url,
@@ -148,26 +182,14 @@ class OpportunityPublisher:
         self.logger.info("Connected to Redis", url=settings.redis_url)
 
     async def close(self):
-        """Close Redis connection."""
         if self._redis:
             await self._redis.close()
             self._redis = None
 
     async def publish(self, opp, opportunity_id: str, opp_type: str = "cross_platform") -> int:
-        """Publish an opportunity to Redis.
-
-        Args:
-            opp: ArbitrageResult or LogicalArbitrageResult.
-            opportunity_id: Database ID.
-            opp_type: Opportunity type.
-
-        Returns:
-            Number of subscribers that received the message.
-        """
         if not self._redis:
             self.logger.warning("Redis not connected, skipping publish")
             return 0
-
         try:
             message = serialize_opportunity(opp, opportunity_id, opp_type)
             receivers = await self._redis.publish(CHANNEL_OPPORTUNITIES, message)
@@ -183,24 +205,15 @@ class OpportunityPublisher:
 
 
 class OpportunitySubscriber:
-    """Subscribes to opportunities from Redis (used by Discord bot).
-
-    Usage:
-        subscriber = OpportunitySubscriber()
-        await subscriber.connect()
-        async for opp_data in subscriber.listen():
-            # Send Discord notification
-            ...
-        await subscriber.close()
-    """
+    """Subscribes to opportunities from Redis (used by Discord bot)."""
 
     def __init__(self):
-        self._redis: Optional[aioredis.Redis] = None
-        self._pubsub: Optional[aioredis.client.PubSub] = None
+        self._redis = None
+        self._pubsub = None
         self.logger = logger.bind(component="OpportunitySubscriber")
 
     async def connect(self):
-        """Connect to Redis and subscribe to opportunity channel."""
+        import redis.asyncio as aioredis
         settings = get_settings()
         self._redis = aioredis.from_url(
             settings.redis_url,
@@ -211,7 +224,6 @@ class OpportunitySubscriber:
         self.logger.info("Subscribed to opportunities channel")
 
     async def close(self):
-        """Close Redis connection."""
         if self._pubsub:
             await self._pubsub.unsubscribe(CHANNEL_OPPORTUNITIES)
             await self._pubsub.close()
@@ -221,14 +233,8 @@ class OpportunitySubscriber:
             self._redis = None
 
     async def listen(self):
-        """Async generator that yields opportunity data dicts.
-
-        Yields:
-            Dict with opportunity data from Redis.
-        """
         if not self._pubsub:
             return
-
         async for message in self._pubsub.listen():
             if message["type"] != "message":
                 continue
@@ -237,31 +243,3 @@ class OpportunitySubscriber:
                 yield data
             except Exception as e:
                 self.logger.error("Failed to deserialize opportunity", error=str(e))
-
-
-class ReactionPublisher:
-    """Publishes user reactions from Discord bot to Redis.
-
-    This allows any process to handle reaction updates (though the bot
-    handles it directly via database writes for simplicity).
-    """
-
-    def __init__(self, redis_client: aioredis.Redis):
-        self._redis = redis_client
-        self.logger = logger.bind(component="ReactionPublisher")
-
-    async def publish_reaction(self, opportunity_id: str, response: str, user_id: int):
-        """Publish a user reaction to Redis.
-
-        Args:
-            opportunity_id: Database opportunity ID.
-            response: "acted" or "passed".
-            user_id: Discord user ID.
-        """
-        data = json.dumps({
-            "opportunity_id": opportunity_id,
-            "response": response,
-            "user_id": user_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        })
-        await self._redis.publish(CHANNEL_REACTIONS, data)
