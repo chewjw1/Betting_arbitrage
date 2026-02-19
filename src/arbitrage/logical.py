@@ -828,14 +828,19 @@ class LogicalArbitrageDetector:
         """
         market = relationship.market_a
 
-        if market.yes_price is None or market.no_price is None:
+        # Use ASK prices (what you'd actually pay to buy), not bid/midpoint.
+        # Bid is what someone will pay you; ask is the cost to buy.
+        yes_buy = market.yes_ask if market.yes_ask is not None else market.yes_price
+        no_buy = market.no_ask if market.no_ask is not None else market.no_price
+
+        if yes_buy is None or no_buy is None:
             return LogicalArbitrageResult(
                 relationship=relationship,
                 is_violated=False,
                 violation_amount=Decimal("0"),
             )
 
-        actual_sum = market.yes_price + market.no_price
+        actual_sum = yes_buy + no_buy
         expected_sum = Decimal("1.0")
         violation = abs(actual_sum - expected_sum)
 
@@ -850,7 +855,7 @@ class LogicalArbitrageDetector:
         if actual_sum < Decimal("0.98"):
             # Buy both sides - guaranteed profit when market resolves
             profit_pct = (Decimal("1") - actual_sum) * 100
-            action = f"Buy YES at ${market.yes_price:.2f} and NO at ${market.no_price:.2f}"
+            action = f"Buy YES at ${yes_buy:.2f} and NO at ${no_buy:.2f}"
             side_a = "yes"
             side_b = "no"
 
@@ -881,8 +886,8 @@ class LogicalArbitrageDetector:
             subtype=relationship.subtype.value if relationship.subtype else None,
             subtype_display=subtype_display,
             fee_breakdown_a=fee_breakdown,
-            price_a=market.yes_price,
-            price_b=market.no_price,
+            price_a=yes_buy,
+            price_b=no_buy,
             side_a=side_a,
             side_b=side_b,
         )
@@ -900,8 +905,14 @@ class LogicalArbitrageDetector:
         """
         group = relationship.group_markets or [relationship.market_a, relationship.market_b]
 
-        # Sum all YES prices
-        prices = [(m, m.yes_price) for m in group if m.yes_price is not None]
+        # Sum all YES prices — use ASK price (what you'd pay to buy), not bid.
+        # Bid is what someone will pay you; ask is what it costs to buy.
+        # Using bid makes markets look artificially cheap → false positives.
+        prices = []
+        for m in group:
+            buy_price = m.yes_ask if m.yes_ask is not None else m.yes_price
+            if buy_price is not None:
+                prices.append((m, buy_price))
 
         # Require at least 5 markets - small groups are almost never truly exhaustive
         # (e.g., 2 of 20 football teams, 3 of 15 presidential candidates)

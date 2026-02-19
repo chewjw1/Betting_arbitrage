@@ -296,9 +296,19 @@ class KalshiCollector(BaseCollector):
         yes_price = None
         no_price = None
 
-        if "yes_bid" in data and data["yes_bid"]:
-            yes_price = Decimal(str(data["yes_bid"])) / 100
-        elif "last_price" in data and data["last_price"]:
+        # Use midpoint of bid/ask as the quoted price (not just bid!)
+        # The bid is what you'd receive selling; ask is what you'd pay buying.
+        # Using bid alone makes markets look cheaper than they are.
+        yes_bid_raw = data.get("yes_bid")
+        yes_ask_raw = data.get("yes_ask")
+
+        if yes_bid_raw and yes_ask_raw:
+            yes_price = (Decimal(str(yes_bid_raw)) + Decimal(str(yes_ask_raw))) / 200
+        elif yes_ask_raw:
+            yes_price = Decimal(str(yes_ask_raw)) / 100
+        elif yes_bid_raw:
+            yes_price = Decimal(str(yes_bid_raw)) / 100
+        elif data.get("last_price"):
             yes_price = Decimal(str(data["last_price"])) / 100
 
         if yes_price is not None:
@@ -322,7 +332,7 @@ class KalshiCollector(BaseCollector):
             category=data.get("category"),
             end_date=end_date,
             status=data.get("status", "open"),
-            url=f"https://kalshi.com/markets/{data.get('ticker', '')}",
+            url=f"https://kalshi.com/markets/{data.get('event_ticker', data.get('ticker', '')).lower()}",
             yes_price=yes_price,
             no_price=no_price,
             yes_bid=Decimal(str(data["yes_bid"])) / 100 if data.get("yes_bid") else None,

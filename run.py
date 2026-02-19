@@ -75,11 +75,37 @@ async def run_discord_bot(subscriber):
             pass
         return
 
+    if not settings.discord_channel_id:
+        logger.warning(
+            "DISCORD_CHANNEL_ID not set — bot will connect but cannot send alerts. "
+            "Set DISCORD_CHANNEL_ID in .env to your alerts channel ID."
+        )
+
+    from discord import LoginFailure
     from src.notifications.discord_bot import ArbitrageBot
 
+    logger.info(
+        "Starting Discord bot",
+        channel_id=settings.discord_channel_id or "NOT SET",
+    )
+
     bot = ArbitrageBot(subscriber=subscriber)
-    async with bot:
-        await bot.start(settings.discord_bot_token)
+    try:
+        async with bot:
+            await bot.start(settings.discord_bot_token)
+    except LoginFailure:
+        logger.error(
+            "Discord login failed — check DISCORD_BOT_TOKEN in .env. "
+            "Get a bot token from https://discord.com/developers/applications"
+        )
+        # Drain queue so scanner doesn't block
+        async for _ in subscriber.listen():
+            pass
+    except Exception as e:
+        logger.error("Discord bot crashed", error=str(e))
+        # Drain queue so scanner doesn't block
+        async for _ in subscriber.listen():
+            pass
 
 
 async def main():
@@ -131,7 +157,16 @@ async def main():
         loop.add_signal_handler(sig, shutdown, sig.name)
 
     try:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Log any task failures that were silently swallowed
+        for task, result in zip(tasks, results):
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                logger.error(
+                    "Task failed",
+                    task=task.get_name(),
+                    error=str(result),
+                    error_type=type(result).__name__,
+                )
     except asyncio.CancelledError:
         pass
     finally:
@@ -145,7 +180,7 @@ if __name__ == "__main__":
     ================================================
     Dashboard:  http://jfk21.phoebe.usbx.me:{settings.api_port}/
     API docs:   http://jfk21.phoebe.usbx.me:{settings.api_port}/docs
-    Discord:    {"Enabled" if settings.discord_bot_token else "NOT CONFIGURED (set DISCORD_BOT_TOKEN)"}
+    Discord:    {"Enabled (channel: " + str(settings.discord_channel_id) + ")" if settings.discord_bot_token else "NOT CONFIGURED (set DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID)"}
     LLM:        {"Enabled" if settings.openai_api_key else "NOT CONFIGURED (set OPENAI_API_KEY)"}
     Database:   {settings.database_url[:60]}
     Scan every: {settings.api_poll_interval_seconds}s
