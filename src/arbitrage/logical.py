@@ -412,10 +412,11 @@ class LogicalArbitrageDetector:
             return OpportunitySubtype.ELECTION_CANDIDATES
         if any(word in titles for word in ["super bowl", "championship", "world series", "nba", "nfl", "mlb"]):
             return OpportunitySubtype.SPORTS_WINNER
-        if any(word in titles for word in ["above", "below", "between", "range"]):
+        if any(word in titles for word in ["above", "below", "between", "range", "more than", "less than", "fewer"]):
             return OpportunitySubtype.RANGE_BUCKETS
 
-        return OpportunitySubtype.ELECTION_CANDIDATES  # Default
+        # Default to RANGE_BUCKETS for non-election/non-sports groups
+        return OpportunitySubtype.RANGE_BUCKETS
 
     def _group_type_to_subtype(self, group_type: str) -> OpportunitySubtype:
         """Convert group type string to OpportunitySubtype."""
@@ -980,11 +981,21 @@ class LogicalArbitrageDetector:
         relationship: LogicalRelationship,
         position_size: Decimal,
     ) -> LogicalArbitrageResult:
-        """Check temporal constraint: earlier deadline should have lower prob."""
+        """Check temporal constraint: earlier deadline should have lower prob.
+
+        Trade: Buy NO on earlier deadline + Buy YES on later deadline.
+        Use ASK prices (what you'd actually pay to buy), not midpoints.
+        The violation is: P(earlier YES) > P(later YES), meaning
+        no_ask_earlier + yes_ask_later < $1.00 guarantees profit.
+        """
         earlier = relationship.market_a
         later = relationship.market_b
 
-        if earlier.yes_price is None or later.yes_price is None:
+        # Use ASK prices (cost to buy), falling back to midpoint
+        earlier_yes = earlier.yes_ask if earlier.yes_ask is not None else earlier.yes_price
+        later_yes = later.yes_ask if later.yes_ask is not None else later.yes_price
+
+        if earlier_yes is None or later_yes is None:
             return LogicalArbitrageResult(
                 relationship=relationship,
                 is_violated=False,
@@ -992,18 +1003,22 @@ class LogicalArbitrageDetector:
             )
 
         # P(earlier) should be ≤ P(later)
-        violation = max(Decimal("0"), earlier.yes_price - later.yes_price)
+        violation = max(Decimal("0"), earlier_yes - later_yes)
         is_violated = violation > Decimal(str(self.min_violation_pct / 100))
 
         action = None
         profit_pct = Decimal("0")
 
+        # Actual trade prices: Buy NO on earlier, Buy YES on later
+        earlier_no_cost = earlier.no_ask if earlier.no_ask is not None else (Decimal("1") - earlier_yes)
+        later_yes_cost = later_yes
+
         if is_violated:
-            # Sell YES on earlier (or buy NO), buy YES on later
-            profit_pct = violation * 100
+            total_cost = earlier_no_cost + later_yes_cost
+            profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
             action = (
-                f"Sell YES on earlier ({earlier.platform}: ${earlier.yes_price:.2f}), "
-                f"Buy YES on later ({later.platform}: ${later.yes_price:.2f})"
+                f"Buy NO on earlier deadline ({earlier.platform}: ${earlier_no_cost:.2f}), "
+                f"Buy YES on later deadline ({later.platform}: ${later_yes_cost:.2f})"
             )
 
         # Fee breakdowns
@@ -1028,9 +1043,9 @@ class LogicalArbitrageDetector:
             subtype_display=subtype_display,
             fee_breakdown_a=fee_a,
             fee_breakdown_b=fee_b,
-            price_a=earlier.yes_price,
-            price_b=later.yes_price,
-            side_a="no",  # Sell YES = Buy NO
+            price_a=earlier_no_cost,
+            price_b=later_yes_cost,
+            side_a="no",
             side_b="yes",
         )
 
@@ -1039,11 +1054,19 @@ class LogicalArbitrageDetector:
         relationship: LogicalRelationship,
         position_size: Decimal,
     ) -> LogicalArbitrageResult:
-        """Check subset constraint: specific outcome should have lower prob."""
+        """Check subset constraint: specific outcome should have lower prob.
+
+        Trade: Buy NO on specific + Buy YES on general.
+        Uses ASK prices (what you'd actually pay to buy).
+        """
         specific = relationship.market_a
         general = relationship.market_b
 
-        if specific.yes_price is None or general.yes_price is None:
+        # Use ASK prices (cost to buy), falling back to midpoint
+        specific_yes = specific.yes_ask if specific.yes_ask is not None else specific.yes_price
+        general_yes = general.yes_ask if general.yes_ask is not None else general.yes_price
+
+        if specific_yes is None or general_yes is None:
             return LogicalArbitrageResult(
                 relationship=relationship,
                 is_violated=False,
@@ -1051,17 +1074,22 @@ class LogicalArbitrageDetector:
             )
 
         # P(specific) should be ≤ P(general)
-        violation = max(Decimal("0"), specific.yes_price - general.yes_price)
+        violation = max(Decimal("0"), specific_yes - general_yes)
         is_violated = violation > Decimal(str(self.min_violation_pct / 100))
 
         action = None
         profit_pct = Decimal("0")
 
+        # Actual trade prices
+        specific_no_cost = specific.no_ask if specific.no_ask is not None else (Decimal("1") - specific_yes)
+        general_yes_cost = general_yes
+
         if is_violated:
-            profit_pct = violation * 100
+            total_cost = specific_no_cost + general_yes_cost
+            profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
             action = (
-                f"Sell YES on specific ({specific.platform}: ${specific.yes_price:.2f}), "
-                f"Buy YES on general ({general.platform}: ${general.yes_price:.2f})"
+                f"Buy NO on specific ({specific.platform}: ${specific_no_cost:.2f}), "
+                f"Buy YES on general ({general.platform}: ${general_yes_cost:.2f})"
             )
 
         # Fee breakdowns
@@ -1086,9 +1114,9 @@ class LogicalArbitrageDetector:
             subtype_display=subtype_display,
             fee_breakdown_a=fee_a,
             fee_breakdown_b=fee_b,
-            price_a=specific.yes_price,
-            price_b=general.yes_price,
-            side_a="no",  # Sell YES = Buy NO
+            price_a=specific_no_cost,
+            price_b=general_yes_cost,
+            side_a="no",
             side_b="yes",
         )
 
@@ -1139,11 +1167,19 @@ class LogicalArbitrageDetector:
         relationship: LogicalRelationship,
         position_size: Decimal,
     ) -> LogicalArbitrageResult:
-        """Check cross-platform logical relationships."""
-        market_a = relationship.market_a
-        market_b = relationship.market_b
+        """Check cross-platform logical relationships.
 
-        if market_a.yes_price is None or market_b.yes_price is None:
+        Trade: Buy NO on earlier deadline + Buy YES on later deadline.
+        Uses ASK prices (what you'd actually pay to buy).
+        """
+        market_a = relationship.market_a  # Earlier deadline
+        market_b = relationship.market_b  # Later deadline
+
+        # Use ASK prices (cost to buy), falling back to midpoint
+        a_yes = market_a.yes_ask if market_a.yes_ask is not None else market_a.yes_price
+        b_yes = market_b.yes_ask if market_b.yes_ask is not None else market_b.yes_price
+
+        if a_yes is None or b_yes is None:
             return LogicalArbitrageResult(
                 relationship=relationship,
                 is_violated=False,
@@ -1151,18 +1187,22 @@ class LogicalArbitrageDetector:
             )
 
         # For temporal cross-platform: earlier deadline should have lower price
-        # market_a is earlier deadline, market_b is later deadline
-        violation = max(Decimal("0"), market_a.yes_price - market_b.yes_price)
+        violation = max(Decimal("0"), a_yes - b_yes)
         is_violated = violation > Decimal(str(self.min_violation_pct / 100))
 
         action = None
         profit_pct = Decimal("0")
 
+        # Actual trade prices
+        a_no_cost = market_a.no_ask if market_a.no_ask is not None else (Decimal("1") - a_yes)
+        b_yes_cost = b_yes
+
         if is_violated:
-            profit_pct = violation * 100
+            total_cost = a_no_cost + b_yes_cost
+            profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
             action = (
-                f"Cross-platform temporal: Sell YES on {market_a.platform} (${market_a.yes_price:.2f}), "
-                f"Buy YES on {market_b.platform} (${market_b.yes_price:.2f})"
+                f"Buy NO on {market_a.platform} (${a_no_cost:.2f}), "
+                f"Buy YES on {market_b.platform} (${b_yes_cost:.2f})"
             )
 
         # Fee breakdowns
@@ -1187,8 +1227,8 @@ class LogicalArbitrageDetector:
             subtype_display=subtype_display,
             fee_breakdown_a=fee_a,
             fee_breakdown_b=fee_b,
-            price_a=market_a.yes_price,
-            price_b=market_b.yes_price,
+            price_a=a_no_cost,
+            price_b=b_yes_cost,
             side_a="no",
             side_b="yes",
         )

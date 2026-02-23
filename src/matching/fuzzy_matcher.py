@@ -900,6 +900,14 @@ class MarketMatcher:
                 platform_a=market_a.platform,
                 title_b=market_b.title,
                 platform_b=market_b.platform,
+                description_a=market_a.description,
+                description_b=market_b.description,
+                resolution_criteria_a=market_a.resolution_criteria,
+                resolution_criteria_b=market_b.resolution_criteria,
+                end_date_a=market_a.end_date,
+                end_date_b=market_b.end_date,
+                category_a=market_a.category,
+                category_b=market_b.category,
             )
             if is_same:
                 validated.append((market_a, market_b, confidence))

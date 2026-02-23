@@ -372,10 +372,17 @@ class ArbitrageScanner:
 
                 is_new = opportunity is None
 
+                # Use prices from the detector result (not raw market data)
+                # The detector computes the correct price for each side
+                price_a = result.price_a if result.price_a is not None else Decimal("0")
+                price_b = result.price_b if result.price_b is not None else Decimal("0")
+
                 if opportunity:
                     # Update existing
-                    opportunity.price_a = market_a_data.yes_price or Decimal("0")
-                    opportunity.price_b = market_b_data.no_price or Decimal("0")
+                    opportunity.side_a = result.side_a or "yes"
+                    opportunity.price_a = price_a
+                    opportunity.side_b = result.side_b or "no"
+                    opportunity.price_b = price_b
                     opportunity.gross_spread = result.violation_amount
                     opportunity.estimated_fees = result.estimated_fees
                     opportunity.net_profit_pct = result.net_profit_pct
@@ -393,11 +400,11 @@ class ArbitrageScanner:
                         platform_a=market_a_data.platform,
                         market_a_id=market_a_db.id,
                         side_a=result.side_a or "yes",
-                        price_a=market_a_data.yes_price or Decimal("0"),
+                        price_a=price_a,
                         platform_b=market_b_data.platform,
                         market_b_id=market_b_db.id,
                         side_b=result.side_b or "no",
-                        price_b=market_b_data.no_price or Decimal("0"),
+                        price_b=price_b,
                         gross_spread=result.violation_amount,
                         estimated_fees=result.estimated_fees,
                         net_profit_pct=result.net_profit_pct,

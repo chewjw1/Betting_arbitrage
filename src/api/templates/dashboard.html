@@ -447,19 +447,19 @@
                 <div class="stat-grid">
                     <div>
                         <div class="stat-value" id="api-markets">-</div>
-                        <div class="stat-label">API Markets</div>
+                        <div class="stat-label">Total Markets</div>
                     </div>
                     <div>
-                        <div class="stat-value" id="scrape-markets">-</div>
-                        <div class="stat-label">Scraped Markets</div>
+                        <div class="stat-value" id="opps-found">-</div>
+                        <div class="stat-label">Opportunities (24h)</div>
                     </div>
                     <div>
                         <div class="stat-value" id="last-api-scan">-</div>
-                        <div class="stat-label">Last API Scan</div>
+                        <div class="stat-label">Last Scan</div>
                     </div>
                     <div>
-                        <div class="stat-value" id="last-scrape-scan">-</div>
-                        <div class="stat-label">Last Scrape Scan</div>
+                        <div class="stat-value" id="scan-health">-</div>
+                        <div class="stat-label">Sources Active</div>
                     </div>
                 </div>
             </div>
@@ -675,12 +675,16 @@
                     </div>
                 `).join('');
 
-                // Update scan status
+                // Update scan status (fields match ScanStatus model)
                 const scan = data.scan_status;
-                document.getElementById('api-markets').textContent = scan.api_markets_count || 0;
-                document.getElementById('scrape-markets').textContent = scan.scrape_markets_count || 0;
-                document.getElementById('last-api-scan').textContent = timeAgo(scan.last_api_scan);
-                document.getElementById('last-scrape-scan').textContent = timeAgo(scan.last_scrape_scan);
+                document.getElementById('api-markets').textContent = scan.markets_count || 0;
+                document.getElementById('opps-found').textContent = scan.opportunities_found || 0;
+                document.getElementById('last-api-scan').textContent = timeAgo(scan.last_scan);
+
+                // Count active sources
+                const activeSources = data.data_sources.filter(s => s.status === 'ok').length;
+                const totalSources = data.data_sources.length;
+                document.getElementById('scan-health').textContent = `${activeSources}/${totalSources}`;
 
             } catch (error) {
                 console.error('Failed to fetch health:', error);
@@ -748,7 +752,10 @@
             tbody.innerHTML = filtered.map((opp, idx) => {
                 const grossPct = parseFloat(opp.gross_spread) * 100;
                 const netPct = parseFloat(opp.net_profit_pct);
-                const totalFees = parseFloat(opp.estimated_fees) * 100;
+                // estimated_fees is already a dollar amount, not a fraction
+                const totalFeesDollar = parseFloat(opp.estimated_fees);
+                const posSize = parseFloat(opp.position_size) || 500;
+                const totalFeesPct = posSize > 0 ? (totalFeesDollar / posSize) * 100 : 0;
 
                 // Build fee breakdown for platform A
                 let feeDetailsA = '';
@@ -834,8 +841,8 @@
                         </td>
                         <td>${grossPct.toFixed(2)}%</td>
                         <td>
-                            <span style="color: #f59e0b;">${totalFees.toFixed(2)}%</span>
-                            <div style="font-size: 10px; color: #71767b;">$${parseFloat(opp.estimated_fees).toFixed(2)}</div>
+                            <span style="color: #f59e0b;">${totalFeesPct.toFixed(2)}%</span>
+                            <div style="font-size: 10px; color: #71767b;">$${totalFeesDollar.toFixed(2)}</div>
                         </td>
                         <td class="${netPct >= 3 ? 'profit-positive' : ''}">${netPct.toFixed(2)}%</td>
                         <td>

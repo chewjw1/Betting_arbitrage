@@ -295,19 +295,25 @@ class KalshiCollector(BaseCollector):
     def _build_kalshi_url(data: dict[str, Any]) -> str:
         """Build a working Kalshi market URL.
 
-        Kalshi URLs follow the pattern: /markets/{series}/{slug}/{event}
-        Since we don't have the slug, we use the event page which shows all outcomes.
+        Kalshi web URLs follow: /markets/{series_ticker}
+        This redirects to the latest event in the series (e.g., /markets/kxfed
+        redirects to /markets/kxfed/fed-funds-rate/kxfed-26mar).
+        The series_ticker is the most reliable short URL format.
         """
+        series_ticker = data.get("series_ticker", "")
         event_ticker = data.get("event_ticker", "")
         ticker = data.get("ticker", "")
 
-        if event_ticker:
-            # Use the events path which reliably shows the market
-            return f"https://kalshi.com/events/{event_ticker}"
+        if series_ticker:
+            return f"https://kalshi.com/markets/{series_ticker.lower()}"
+        elif event_ticker:
+            # Extract series from event ticker (e.g., "KXFED-26MAR" -> "kxfed")
+            series = event_ticker.split("-")[0].lower() if "-" in event_ticker else event_ticker.lower()
+            return f"https://kalshi.com/markets/{series}"
         elif ticker:
-            # Fallback to market ticker
-            return f"https://kalshi.com/events/{ticker}"
-        return "https://kalshi.com/markets"
+            series = ticker.split("-")[0].lower() if "-" in ticker else ticker.lower()
+            return f"https://kalshi.com/markets/{series}"
+        return "https://kalshi.com/browse"
 
     def _parse_market(self, data: dict[str, Any]) -> MarketData:
         """Parse Kalshi API market response into MarketData."""
