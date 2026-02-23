@@ -125,6 +125,25 @@ class PolymarketCollector(BaseCollector):
                 if condition_id:
                     url = f"https://polymarket.com/event?id={condition_id}"
 
+        # Extract bid/ask from Gamma API best prices if available
+        yes_bid = None
+        yes_ask = None
+        no_bid = None
+        no_ask = None
+
+        # Gamma API sometimes provides bestBid/bestAsk
+        if data.get("bestBid"):
+            yes_bid = Decimal(str(data["bestBid"]))
+        if data.get("bestAsk"):
+            yes_ask = Decimal(str(data["bestAsk"]))
+
+        # Derive NO bid/ask from YES data (Polymarket NO is a separate token
+        # but its price is mechanically linked: no_ask ≈ 1 - yes_bid)
+        if yes_bid is not None and no_ask is None:
+            no_ask = Decimal("1") - yes_bid
+        if yes_ask is not None and no_bid is None:
+            no_bid = Decimal("1") - yes_ask
+
         return MarketData(
             platform=self.platform_name,
             platform_market_id=data.get("conditionId", data.get("id", "")),
@@ -137,6 +156,10 @@ class PolymarketCollector(BaseCollector):
             url=url,
             yes_price=yes_price,
             no_price=no_price,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            no_bid=no_bid,
+            no_ask=no_ask,
             total_volume=Decimal(str(data["volume"])) if data.get("volume") else None,
         )
 

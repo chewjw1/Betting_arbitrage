@@ -60,6 +60,7 @@ class KalshiCollector(BaseCollector):
         self._private_key = None
         self._api_key: str = self.settings.kalshi_api_key
         self._authenticated: bool = False
+        self._rate_limit_429_count: int = 0  # 429 hits per fetch_markets call
 
     async def connect(self) -> None:
         """Initialize HTTP client and authenticate if credentials available."""
@@ -401,6 +402,7 @@ class KalshiCollector(BaseCollector):
                     break  # Series has no markets
                 if e.response.status_code == 429 and retries_on_429 < 3:
                     retries_on_429 += 1
+                    self._rate_limit_429_count += 1
                     wait_time = 2 ** retries_on_429  # 2s, 4s, 8s
                     await asyncio.sleep(wait_time)
                     continue
@@ -460,6 +462,8 @@ class KalshiCollector(BaseCollector):
 
         if not self.client:
             raise RuntimeError("Collector not connected. Call connect() first.")
+
+        self._rate_limit_429_count = 0  # Reset per-scan counter
 
         # Determine categories to fetch
         if category:
@@ -565,6 +569,7 @@ class KalshiCollector(BaseCollector):
             series_checked=min(len(series_tickers), api_calls),
             series_with_markets=series_with_markets,
             api_calls=api_calls,
+            rate_limit_429s=self._rate_limit_429_count,
             categories=categories,
         )
         return markets

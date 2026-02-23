@@ -83,6 +83,18 @@
             background: #065f46;
             color: #34d399;
         }
+        .stale-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+            background: #78350f;
+            color: #fbbf24;
+        }
+        .opp-row.stale {
+            opacity: 0.55;
+        }
         .times-seen {
             font-size: 9px;
             color: #71767b;
@@ -221,6 +233,11 @@
         .platform-price {
             font-weight: 600;
             font-size: 14px;
+        }
+        .platform-price-label {
+            font-size: 9px;
+            color: #71767b;
+            font-weight: 400;
         }
         .platform-side {
             font-size: 10px;
@@ -585,6 +602,18 @@
             return '';
         }
 
+        function isStale(detectedAt) {
+            if (!detectedAt) return true;
+            let dateStr = String(detectedAt);
+            if (!dateStr.endsWith('Z') && !dateStr.includes('+')) {
+                dateStr = dateStr.includes('T') ? dateStr + 'Z' : dateStr + 'Z';
+            }
+            const then = new Date(dateStr);
+            const ageSeconds = (Date.now() - then.getTime()) / 1000;
+            // Stale if not seen in last 25 minutes (>2x the 10-min scan interval)
+            return ageSeconds > 1500;
+        }
+
         function toggleDetail(id) {
             const row = document.getElementById(id);
             if (row) {
@@ -782,15 +811,17 @@
 
                 // Build actionable instructions
                 const actionSteps = buildActionSteps(opp);
+                const stale = isStale(opp.detected_at);
 
                 return `
-                    <tr class="opp-row" data-type="${opp.opportunity_type}" onclick="toggleDetail('detail-${idx}')">
+                    <tr class="opp-row${stale ? ' stale' : ''}" data-type="${opp.opportunity_type}" onclick="toggleDetail('detail-${idx}')">
                         <td>
                             <div>${formatTime(opp.detected_at)}</div>
                             <div class="time-ago">${timeAgo(opp.detected_at)}</div>
                         </td>
                         <td>
                             <span class="type-badge ${getTypeClass(opp.opportunity_type)}">${getTypeName(opp.opportunity_type, opp.platform_a, opp.platform_b)}</span>
+                            ${stale ? '<br><span class="stale-badge">STALE</span>' : ''}
                             ${opp.spread_persistent ? '<br><span class="persistent-badge">STRUCTURAL</span>' : ''}
                             ${opp.times_seen > 1 ? `<br><span class="times-seen">Seen ${opp.times_seen}x</span>` : ''}
                             ${subtypeDisplay ? `<br><span class="subtype-badge">${subtypeDisplay}</span>` : ''}
@@ -800,8 +831,8 @@
                                 <div class="platform-row">
                                     <span class="platform-tag ${getPlatformClass(opp.platform_a)}">${opp.platform_a}</span>
                                     <div class="platform-info">
-                                        <span class="platform-price">${formatPrice(opp.price_a)}</span>
-                                        <span class="platform-side">${opp.side_a}</span>
+                                        <span class="platform-price">${formatPrice(opp.price_a)} <span class="platform-price-label">ask</span></span>
+                                        <span class="platform-side">Buy ${opp.side_a}</span>
                                     </div>
                                 </div>
                                 ${opp.market_a_url ?
@@ -817,8 +848,8 @@
                                     `<div class="platform-row">
                                         <span class="platform-side" style="font-size: 12px; color: #71767b;">Same market</span>
                                         <div class="platform-info">
-                                            <span class="platform-price">${formatPrice(opp.price_b)}</span>
-                                            <span class="platform-side">${opp.side_b || 'no'}</span>
+                                            <span class="platform-price">${formatPrice(opp.price_b)} <span class="platform-price-label">ask</span></span>
+                                            <span class="platform-side">Buy ${opp.side_b || 'no'}</span>
                                         </div>
                                     </div>
                                     ${opp.market_a_url ?
@@ -827,8 +858,8 @@
                                     `<div class="platform-row">
                                         <span class="platform-tag ${getPlatformClass(opp.platform_b)}">${opp.platform_b}</span>
                                         <div class="platform-info">
-                                            <span class="platform-price">${formatPrice(opp.price_b)}</span>
-                                            <span class="platform-side">${opp.side_b}</span>
+                                            <span class="platform-price">${formatPrice(opp.price_b)} <span class="platform-price-label">ask</span></span>
+                                            <span class="platform-side">Buy ${opp.side_b}</span>
                                         </div>
                                     </div>
                                     ${opp.market_b_url ?

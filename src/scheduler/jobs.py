@@ -23,7 +23,7 @@ from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import select, update
 import structlog
 
 from src.arbitrage import CrossPlatformDetector, LogicalArbitrageDetector
@@ -210,6 +210,10 @@ class ArbitrageScanner:
             elif opportunity_id:
                 notifications_skipped += 1
 
+        # --- Auto-expire stale opportunities ---
+        # Any active opportunity not re-detected in this scan is expired
+        expired_count = await self._expire_stale_opportunities(start_time)
+
         scan_time = time.time() - start_time
 
         # Update dashboard health status
@@ -223,6 +227,7 @@ class ArbitrageScanner:
             logical_found=len(logical_opps),
             notifications_sent=notifications_sent,
             notifications_skipped=notifications_skipped,
+            expired=expired_count,
             total_markets=sum(len(m) for m in markets_by_platform.values()),
         )
 
@@ -420,6 +425,46 @@ class ArbitrageScanner:
             except Exception as e:
                 self.logger.error("Failed to store logical opportunity", error=str(e))
                 return None, False
+
+    async def _expire_stale_opportunities(self, scan_start_time: float) -> int:
+        """Mark active opportunities as expired if not re-detected this scan.
+
+        Any opportunity whose detected_at is before the scan start time
+        was not updated/re-detected during this scan cycle, meaning the
+        underlying market closed, resolved, or the spread vanished.
+
+        Returns:
+            Number of opportunities expired.
+        """
+        scan_start_dt = datetime.utcfromtimestamp(scan_start_time)
+
+        async with async_session_factory() as session:
+            try:
+                stmt = (
+                    update(Opportunity)
+                    .where(
+                        Opportunity.status == "active",
+                        Opportunity.detected_at < scan_start_dt,
+                    )
+                    .values(
+                        status="expired",
+                        expired_at=datetime.utcnow(),
+                    )
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                expired_count = result.rowcount
+
+                if expired_count > 0:
+                    self.logger.info(
+                        "Expired stale opportunities",
+                        expired_count=expired_count,
+                    )
+                return expired_count
+
+            except Exception as e:
+                self.logger.error("Failed to expire stale opportunities", error=str(e))
+                return 0
 
 # Global scanner instance
 _scanner: Optional[ArbitrageScanner] = None

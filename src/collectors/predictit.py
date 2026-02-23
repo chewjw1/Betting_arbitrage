@@ -76,11 +76,23 @@ class PredictItCollector(BaseCollector):
         # Use best buy prices if available (more accurate for arbitrage)
         yes_bid = None
         yes_ask = None
+        no_bid = None
+        no_ask = None
 
         if contract.get("bestBuyYesCost"):
             yes_ask = Decimal(str(contract["bestBuyYesCost"]))
         if contract.get("bestSellYesCost"):
             yes_bid = Decimal(str(contract["bestSellYesCost"]))
+        if contract.get("bestBuyNoCost"):
+            no_ask = Decimal(str(contract["bestBuyNoCost"]))
+        if contract.get("bestSellNoCost"):
+            no_bid = Decimal(str(contract["bestSellNoCost"]))
+
+        # Derive NO prices from YES if PredictIt didn't provide them directly
+        if no_ask is None and yes_bid is not None:
+            no_ask = Decimal("1") - yes_bid
+        if no_bid is None and yes_ask is not None:
+            no_bid = Decimal("1") - yes_ask
 
         # Parse end date
         end_date = None
@@ -114,6 +126,8 @@ class PredictItCollector(BaseCollector):
             no_price=no_price,
             yes_bid=yes_bid,
             yes_ask=yes_ask,
+            no_bid=no_bid,
+            no_ask=no_ask,
         )
 
     @retry(

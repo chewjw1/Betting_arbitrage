@@ -1016,10 +1016,14 @@ class LogicalArbitrageDetector:
         if is_violated:
             total_cost = earlier_no_cost + later_yes_cost
             profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
-            action = (
-                f"Buy NO on earlier deadline ({earlier.platform}: ${earlier_no_cost:.2f}), "
-                f"Buy YES on later deadline ({later.platform}: ${later_yes_cost:.2f})"
-            )
+            # Guard: if bid/ask spread eats the profit, no real violation
+            if profit_pct <= Decimal("0"):
+                is_violated = False
+            else:
+                action = (
+                    f"Buy NO on earlier deadline ({earlier.platform}: ${earlier_no_cost:.2f}), "
+                    f"Buy YES on later deadline ({later.platform}: ${later_yes_cost:.2f})"
+                )
 
         # Fee breakdowns
         fee_a = self._calculate_fee_breakdown(earlier.platform, position_size, profit_pct / 100 * position_size / 2)
@@ -1087,10 +1091,13 @@ class LogicalArbitrageDetector:
         if is_violated:
             total_cost = specific_no_cost + general_yes_cost
             profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
-            action = (
-                f"Buy NO on specific ({specific.platform}: ${specific_no_cost:.2f}), "
-                f"Buy YES on general ({general.platform}: ${general_yes_cost:.2f})"
-            )
+            if profit_pct <= Decimal("0"):
+                is_violated = False
+            else:
+                action = (
+                    f"Buy NO on specific ({specific.platform}: ${specific_no_cost:.2f}), "
+                    f"Buy YES on general ({general.platform}: ${general_yes_cost:.2f})"
+                )
 
         # Fee breakdowns
         fee_a = self._calculate_fee_breakdown(specific.platform, position_size, profit_pct / 100 * position_size / 2)
@@ -1200,10 +1207,13 @@ class LogicalArbitrageDetector:
         if is_violated:
             total_cost = a_no_cost + b_yes_cost
             profit_pct = (Decimal("1") - total_cost) * 100 if total_cost < Decimal("1") else Decimal("0")
-            action = (
-                f"Buy NO on {market_a.platform} (${a_no_cost:.2f}), "
-                f"Buy YES on {market_b.platform} (${b_yes_cost:.2f})"
-            )
+            if profit_pct <= Decimal("0"):
+                is_violated = False
+            else:
+                action = (
+                    f"Buy NO on {market_a.platform} (${a_no_cost:.2f}), "
+                    f"Buy YES on {market_b.platform} (${b_yes_cost:.2f})"
+                )
 
         # Fee breakdowns
         fee_a = self._calculate_fee_breakdown(market_a.platform, position_size, profit_pct / 100 * position_size / 2)
