@@ -38,6 +38,16 @@ _active_series_cache: set[str] = set()
 _active_series_cache_time: Optional[datetime] = None
 _ACTIVE_SERIES_CACHE_TTL_HOURS = 1  # Shorter TTL - markets open/close more often
 
+# Adaptive rate limiting: persists across scans to learn the right pace
+_rate_limit_delay: float = 0.15  # Current delay between requests (seconds)
+_rate_limit_concurrency: int = 10  # Current concurrency level
+_DELAY_MIN = 0.10  # Fastest we'll go (authenticated)
+_DELAY_MAX = 2.0   # Slowest before we're wasting time
+_DELAY_UNAUTH_MIN = 0.20  # Fastest for unauthenticated
+_CONCURRENCY_MIN = 2
+_CONCURRENCY_MAX_AUTH = 10
+_CONCURRENCY_MAX_UNAUTH = 5
+
 
 class KalshiCollector(BaseCollector):
     """Collector for Kalshi prediction market API.
@@ -503,9 +513,13 @@ class KalshiCollector(BaseCollector):
                 unknown=len(unknown),
             )
 
-        # Step 2: Fetch markets per-series with concurrency control
-        # Authenticated users get higher rate limits
-        concurrency = 10 if self._authenticated else 5
+        # Step 2: Fetch markets per-series with adaptive rate control
+        global _rate_limit_delay, _rate_limit_concurrency
+
+        concurrency_max = _CONCURRENCY_MAX_AUTH if self._authenticated else _CONCURRENCY_MAX_UNAUTH
+        concurrency = min(_rate_limit_concurrency, concurrency_max)
+        delay = max(_rate_limit_delay, _DELAY_UNAUTH_MIN if not self._authenticated else _DELAY_MIN)
+
         markets = []
         series_with_markets = 0
         api_calls = 0
@@ -518,8 +532,6 @@ class KalshiCollector(BaseCollector):
             async with semaphore:
                 if stop_flag:
                     return ticker, []
-                # Small delay to spread requests
-                delay = 0.15 if self._authenticated else 0.25
                 await asyncio.sleep(delay)
                 api_calls += 1
                 result = await self._fetch_markets_for_series(
@@ -562,6 +574,24 @@ class KalshiCollector(BaseCollector):
         if len(markets) > max_markets:
             markets = markets[:max_markets]
 
+        # Adaptive rate adjustment based on 429s this scan
+        prev_delay = delay
+        prev_concurrency = concurrency
+        if self._rate_limit_429_count >= 5:
+            # Heavy throttling — slow down significantly
+            _rate_limit_delay = min(delay * 2.0, _DELAY_MAX)
+            _rate_limit_concurrency = max(concurrency - 2, _CONCURRENCY_MIN)
+        elif self._rate_limit_429_count >= 1:
+            # Light throttling — nudge slower
+            _rate_limit_delay = min(delay * 1.3, _DELAY_MAX)
+            _rate_limit_concurrency = max(concurrency - 1, _CONCURRENCY_MIN)
+        elif api_calls > 20 and self._rate_limit_429_count == 0:
+            # Clean scan with meaningful traffic — try speeding up
+            delay_min = _DELAY_UNAUTH_MIN if not self._authenticated else _DELAY_MIN
+            conc_max = _CONCURRENCY_MAX_AUTH if self._authenticated else _CONCURRENCY_MAX_UNAUTH
+            _rate_limit_delay = max(delay * 0.85, delay_min)
+            _rate_limit_concurrency = min(concurrency + 1, conc_max)
+
         self.logger.info(
             "Fetched markets from Kalshi",
             count=len(markets),
@@ -570,6 +600,8 @@ class KalshiCollector(BaseCollector):
             series_with_markets=series_with_markets,
             api_calls=api_calls,
             rate_limit_429s=self._rate_limit_429_count,
+            delay=f"{prev_delay:.2f}s→{_rate_limit_delay:.2f}s",
+            concurrency=f"{prev_concurrency}→{_rate_limit_concurrency}",
             categories=categories,
         )
         return markets
