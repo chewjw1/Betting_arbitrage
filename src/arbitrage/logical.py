@@ -408,7 +408,11 @@ class LogicalArbitrageDetector:
         """Classify a mutually exclusive group by subtype."""
         titles = " ".join(m.title.lower() for m in group)
 
-        if any(word in titles for word in ["election", "president", "governor", "senator", "nominee"]):
+        if any(word in titles for word in [
+            "election", "president", "governor", "senator", "nominee",
+            "secretary", "cabinet", "minister", "speaker", "chair",
+            "who will be", "who will win",
+        ]):
             return OpportunitySubtype.ELECTION_CANDIDATES
         if any(word in titles for word in ["super bowl", "championship", "world series", "nba", "nfl", "mlb"]):
             return OpportunitySubtype.SPORTS_WINNER
@@ -427,7 +431,7 @@ class LogicalArbitrageDetector:
             "btc_price_range": OpportunitySubtype.RANGE_BUCKETS,
             "sp500_price_range": OpportunitySubtype.RANGE_BUCKETS,
         }
-        return mapping.get(group_type, OpportunitySubtype.ELECTION_CANDIDATES)
+        return mapping.get(group_type, OpportunitySubtype.RANGE_BUCKETS)
 
     def _extract_base_question(self, title: str) -> Optional[str]:
         """Extract the base question from a market title.
@@ -974,6 +978,12 @@ class LogicalArbitrageDetector:
             opportunity_type="logical",
             subtype=relationship.subtype.value if relationship.subtype else None,
             subtype_display=subtype_display,
+            # For exhaustive groups: price_a = total cost to buy YES on all,
+            # price_b = guaranteed payout ($1.00)
+            price_a=actual_sum,
+            price_b=Decimal("1"),
+            side_a="yes",
+            side_b="yes",
         )
 
     def _check_temporal(
