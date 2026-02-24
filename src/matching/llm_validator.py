@@ -28,6 +28,25 @@ class LLMMatchValidator:
     2. Database cache for persistence across restarts
     """
 
+    # Shared DIFFERENT criteria used in both prompts
+    _DIFFERENT_CRITERIA = (
+        "DIFFERENT if ANY of these apply:\n"
+        "- Different people, countries, or entities\n"
+        "- Different time periods, deadlines, or resolution windows "
+        "(e.g., 'before August 2026' vs 'before end of term' are DIFFERENT)\n"
+        "- Different stages or rounds of the same process "
+        "(e.g., 'win 1st round' vs 'win the election' are DIFFERENT — "
+        "you can win a runoff without winning round 1)\n"
+        "- Different positions (president vs VP, secretary vs chair)\n"
+        "- Different actions (win vs announce, visit, buy, nominate)\n"
+        "- Different scope (one state vs four, single race vs overall)\n"
+        "- Inverse polarity (uphold vs strike down, pass vs block)\n"
+        "- One is a subset of the other (specific deadline vs open-ended)\n"
+        "- Fundamentally different questions despite similar wording\n\n"
+        "SAME only if both markets resolve YES/NO under the EXACT same "
+        "conditions with the same deadline. When in doubt, say DIFFERENT."
+    )
+
     # Basic prompt when no extra context is available (titles only)
     PROMPT_TEMPLATE_BASIC = (
         "Are these two prediction market questions about the SAME specific "
@@ -35,17 +54,15 @@ class LLMMatchValidator:
         'Market A ({platform_a}): "{title_a}"\n'
         'Market B ({platform_b}): "{title_b}"\n\n'
         "Answer SAME or DIFFERENT (one word only).\n\n"
-        "DIFFERENT if: different people, countries, time periods, positions "
-        "(president vs VP), actions (win vs announce/visit/buy), scope "
-        "(one state vs four), inverse polarity (uphold vs strike down), "
-        "or fundamentally different questions."
+        + _DIFFERENT_CRITERIA
     )
 
     # Enhanced prompt with description, resolution criteria, dates, category
     PROMPT_TEMPLATE_ENRICHED = (
         "You are a precision filter for a prediction market arbitrage system. "
         "We've already determined these markets are textually similar. "
-        "Your job: confirm they resolve on the SAME specific outcome.\n\n"
+        "Your job: confirm they resolve on the EXACT same outcome, under "
+        "the EXACT same conditions and deadline.\n\n"
         "MARKET A ({platform_a})\n"
         "Title: {title_a}\n"
         "{context_a}\n"
@@ -53,13 +70,7 @@ class LLMMatchValidator:
         "Title: {title_b}\n"
         "{context_b}\n"
         "Answer SAME or DIFFERENT (one word only).\n\n"
-        "DIFFERENT if: different people/entities, different countries, "
-        "different time periods or deadlines, different positions "
-        "(president vs VP), different actions (win vs announce/visit), "
-        "different scope (one state vs four states), inverse polarity "
-        "(uphold vs strike down), conflicting resolution criteria, "
-        "different resolution dates (>30 days apart), or fundamentally "
-        "different questions despite similar wording."
+        + _DIFFERENT_CRITERIA
     )
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
