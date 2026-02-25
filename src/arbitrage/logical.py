@@ -586,21 +586,10 @@ class LogicalArbitrageDetector:
         cleaned_a = remove_temporal(title_a_lower)
         cleaned_b = remove_temporal(title_b_lower)
 
-        # If titles are identical after removing temporal info, they're definitely different deadlines
-        if cleaned_a == cleaned_b:
-            return True
-
-        # Simple similarity check
-        words_a = set(cleaned_a.split())
-        words_b = set(cleaned_b.split())
-
-        if not words_a or not words_b:
-            return False
-
-        overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
-
-        # Require higher overlap (85%) and ensure there's actually a temporal difference
-        return overlap > 0.85
+        # After removing temporal info, titles must be identical.
+        # Fuzzy overlap is too risky — "Israel and Colombia" vs "Israel and Saudi Arabia"
+        # can score 85%+ but are completely different events.
+        return cleaned_a == cleaned_b
 
     def _find_subset_relationships(
         self,

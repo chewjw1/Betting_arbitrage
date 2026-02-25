@@ -641,19 +641,31 @@
             let summary = '';
 
             if (isSameMarket && isLogical) {
-                // Logical arbitrage on same platform (complement: buy YES + NO)
                 const marketLink = urlA ? `<a href="${urlA}" target="_blank" onclick="event.stopPropagation()">${platA}</a>` : platA;
-                steps += `
-                    <div class="action-step">
-                        <span class="step-number">1</span>
-                        <span class="step-text">Buy <strong>${sideA}</strong> at <strong>${priceA}</strong> on ${marketLink}</span>
-                    </div>
-                    <div class="action-step">
-                        <span class="step-number">2</span>
-                        <span class="step-text">Buy <strong>${sideB}</strong> at <strong>${priceB}</strong> on ${marketLink}</span>
-                    </div>`;
-                const totalCost = (parseFloat(opp.price_a) + parseFloat(opp.price_b)).toFixed(2);
-                summary = `Total cost: $${totalCost} per share pair. Guaranteed payout: $1.00. Net profit: ${netPct}% after fees.`;
+
+                // Exhaustive group arb: buy YES on all outcomes
+                const isExhaustiveGroup = sideA === 'YES' && sideB === 'YES';
+
+                if (isExhaustiveGroup) {
+                    steps += `
+                        <div class="action-step">
+                            <span class="step-number">1</span>
+                            <span class="step-text">Buy <strong>YES</strong> on <strong>all outcomes</strong> in this group on ${marketLink}</span>
+                        </div>`;
+                    summary = `Total cost: ${priceA} across all contracts. Guaranteed payout: $1.00 (one must win). Net profit: ${netPct}% after fees.`;
+                } else {
+                    steps += `
+                        <div class="action-step">
+                            <span class="step-number">1</span>
+                            <span class="step-text">Buy <strong>${sideA}</strong> at <strong>${priceA}</strong> on ${marketLink}</span>
+                        </div>
+                        <div class="action-step">
+                            <span class="step-number">2</span>
+                            <span class="step-text">Buy <strong>${sideB}</strong> at <strong>${priceB}</strong> on ${marketLink}</span>
+                        </div>`;
+                    const totalCost = (parseFloat(opp.price_a) + parseFloat(opp.price_b)).toFixed(2);
+                    summary = `Total cost: $${totalCost} per share pair. Guaranteed payout: $1.00. Net profit: ${netPct}% after fees.`;
+                }
             } else {
                 // Cross-platform: buy on two different platforms
                 const linkA = urlA ? `<a href="${urlA}" target="_blank" onclick="event.stopPropagation()">${platA}</a>` : platA;
@@ -831,8 +843,12 @@
                                 <div class="platform-row">
                                     <span class="platform-tag ${getPlatformClass(opp.platform_a)}">${opp.platform_a}</span>
                                     <div class="platform-info">
-                                        <span class="platform-price">${formatPrice(opp.price_a)} <span class="platform-price-label">ask</span></span>
-                                        <span class="platform-side">Buy ${opp.side_a}</span>
+                                        ${(opp.side_a === 'yes' && opp.side_b === 'yes' && opp.platform_a === opp.platform_b) ?
+                                            `<span class="platform-price">${formatPrice(opp.price_a)} <span class="platform-price-label">total cost</span></span>
+                                             <span class="platform-side">Buy YES on all</span>` :
+                                            `<span class="platform-price">${formatPrice(opp.price_a)} <span class="platform-price-label">ask</span></span>
+                                             <span class="platform-side">Buy ${opp.side_a}</span>`
+                                        }
                                     </div>
                                 </div>
                                 ${opp.market_a_url ?
@@ -844,7 +860,15 @@
                         </td>
                         <td>
                             <div class="platform-details">
-                                ${opp.platform_a === opp.platform_b ?
+                                ${(opp.side_a === 'yes' && opp.side_b === 'yes' && opp.platform_a === opp.platform_b) ?
+                                    `<div class="platform-row">
+                                        <span class="platform-side" style="font-size: 12px; color: #71767b;">Exhaustive group</span>
+                                        <div class="platform-info">
+                                            <span class="platform-price">${formatPrice(opp.price_b)} <span class="platform-price-label">payout</span></span>
+                                            <span class="platform-side">One must win</span>
+                                        </div>
+                                    </div>` :
+                                opp.platform_a === opp.platform_b ?
                                     `<div class="platform-row">
                                         <span class="platform-side" style="font-size: 12px; color: #71767b;">Same market</span>
                                         <div class="platform-info">
