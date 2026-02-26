@@ -33,6 +33,7 @@ from src.collectors import (
     PolymarketCollector,
     PredictItCollector,
     DraftKingsCollector,
+    IBKRCollector,
 )
 from src.collectors.base import MarketData
 from src.config import get_settings
@@ -139,6 +140,7 @@ class ArbitrageScanner:
             "polymarket": PolymarketCollector(),
             "predictit": PredictItCollector(),
             "draftkings": DraftKingsCollector(include_sports=False),
+            "ibkr": IBKRCollector(),
         }
 
         # Collect in parallel

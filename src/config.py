@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     # DraftKings API
     draftkings_base_url: str = Field(default="https://predictions.draftkings.com")
 
+    # IBKR Client Portal API (ForecastEx)
+    ibkr_gateway_url: str = Field(
+        default="https://localhost:5000",
+        description="IBKR Client Portal Gateway URL (run via IBeam or manual)",
+    )
+    ibkr_gateway_enabled: bool = Field(
+        default=True,
+        description="Enable IBKR ForecastEx collection (requires running Gateway)",
+    )
+
     # Discord
     discord_bot_token: str = Field(default="")
     discord_channel_id: int = Field(default=0)
