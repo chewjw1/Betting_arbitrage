@@ -166,10 +166,16 @@ class IBKRCollector(BaseCollector):
         # Also check yesQuote/noQuote for real-time prices
         yes_quote = contract.get("yesQuote")
         no_quote = contract.get("noQuote")
-        if yes_quote and yes_quote > 0:
-            yes_price = Decimal(str(yes_quote)) / 100
-        if no_quote and no_quote > 0:
-            no_price = Decimal(str(no_quote)) / 100
+        try:
+            if yes_quote and float(yes_quote) > 0:
+                yes_price = Decimal(str(yes_quote)) / 100
+        except (ValueError, TypeError):
+            pass
+        try:
+            if no_quote and float(no_quote) > 0:
+                no_price = Decimal(str(no_quote)) / 100
+        except (ValueError, TypeError):
+            pass
 
         # Parse open interest/volume
         interest_str = contract.get("interest", "0")

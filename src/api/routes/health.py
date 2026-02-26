@@ -66,7 +66,7 @@ async def get_scan_status_from_db(session: AsyncSession) -> ScanStatus:
     """Derive scan status from the database (works across processes)."""
     scan_status = ScanStatus()
 
-    all_platforms = ["kalshi", "polymarket", "predictit", "draftkings"]
+    all_platforms = ["kalshi", "polymarket", "predictit", "draftkings", "ibkr"]
 
     # Count total markets
     count_query = (
@@ -213,6 +213,46 @@ async def check_kalshi() -> DataSourceStatus:
         )
 
 
+async def check_ibkr() -> DataSourceStatus:
+    """Check IBKR ForecastEx API health."""
+    start = datetime.utcnow()
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            "https://www.interactivebrokers.com/response_handlers/fcastex/"
+        )
+        req.add_header("User-Agent", "Mozilla/5.0")
+
+        loop = asyncio.get_event_loop()
+
+        def fetch():
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+
+        data = await loop.run_in_executor(None, fetch)
+        count = len(data) if isinstance(data, dict) else 0
+
+        elapsed = (datetime.utcnow() - start).total_seconds() * 1000
+
+        return DataSourceStatus(
+            name="ibkr",
+            status="ok",
+            last_check=datetime.utcnow(),
+            markets_count=count,
+            response_time_ms=int(elapsed),
+        )
+    except Exception as e:
+        return DataSourceStatus(
+            name="ibkr",
+            status="error",
+            last_check=datetime.utcnow(),
+            error=str(e)[:100],
+        )
+
+
 async def check_scraper_status_from_db(
     name: str,
     session: AsyncSession,
@@ -275,6 +315,7 @@ async def get_health_status(
         check_predictit(),
         check_polymarket(),
         check_kalshi(),
+        check_ibkr(),
         return_exceptions=True,
     )
 
