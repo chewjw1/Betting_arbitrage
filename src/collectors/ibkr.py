@@ -17,7 +17,7 @@ Note: CME Event Contracts (Bitcoin, Gold, indices) require the Client Portal
 Gateway for access - they are not available through this public endpoint.
 """
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 import httpx
@@ -157,9 +157,9 @@ class IBKRCollector(BaseCollector):
 
         try:
             # Prices are in cents (0-100), normalize to 0-1
-            yes_price = Decimal(str(yes_str)) / 100
-            no_price = Decimal(str(no_str)) / 100
-        except (ValueError, TypeError):
+            yes_price = Decimal(str(yes_str).strip()) / 100
+            no_price = Decimal(str(no_str).strip()) / 100
+        except (ValueError, TypeError, InvalidOperation):
             yes_price = None
             no_price = None
 
@@ -167,14 +167,18 @@ class IBKRCollector(BaseCollector):
         yes_quote = contract.get("yesQuote")
         no_quote = contract.get("noQuote")
         try:
-            if yes_quote and float(yes_quote) > 0:
-                yes_price = Decimal(str(yes_quote)) / 100
-        except (ValueError, TypeError):
+            if yes_quote is not None:
+                yq = float(yes_quote)
+                if yq > 0:
+                    yes_price = Decimal(str(yq)) / 100
+        except (ValueError, TypeError, InvalidOperation):
             pass
         try:
-            if no_quote and float(no_quote) > 0:
-                no_price = Decimal(str(no_quote)) / 100
-        except (ValueError, TypeError):
+            if no_quote is not None:
+                nq = float(no_quote)
+                if nq > 0:
+                    no_price = Decimal(str(nq)) / 100
+        except (ValueError, TypeError, InvalidOperation):
             pass
 
         # Parse open interest/volume
