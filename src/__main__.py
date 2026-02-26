@@ -40,7 +40,7 @@ async def run_scheduler(publisher=None):
     # Add scan job
     scheduler.add_job(
         scanner.run_scan,
-        IntervalTrigger(minutes=settings.scan_interval_minutes),
+        IntervalTrigger(minutes=settings.api_poll_interval_seconds // 60 or 10),
         id="arbitrage_scan",
         name="Arbitrage Scan",
         max_instances=1,
@@ -50,7 +50,7 @@ async def run_scheduler(publisher=None):
     scheduler.start()
     logger.info(
         "Scheduler started",
-        interval_minutes=settings.scan_interval_minutes,
+        interval_minutes=settings.api_poll_interval_seconds // 60 or 10,
     )
 
     # Run initial scan
@@ -65,13 +65,18 @@ async def run_scheduler(publisher=None):
     logger.info("Scheduler stopped")
 
 
-async def run_discord_bot(publisher):
+async def run_discord_bot(subscriber):
     """Run the Discord bot for notifications."""
     try:
-        from src.notifications.discord_bot import DiscordNotifier
+        from src.notifications.discord_bot import ArbitrageBot
 
-        bot = DiscordNotifier(publisher=publisher)
-        await bot.start()
+        if not settings.discord_bot_token:
+            logger.warning("DISCORD_BOT_TOKEN not set, skipping Discord bot")
+            return
+
+        bot = ArbitrageBot(subscriber=subscriber)
+        async with bot:
+            await bot.start(settings.discord_bot_token)
     except ImportError:
         logger.warning("Discord bot not available (missing discord.py?)")
     except Exception as e:
@@ -120,16 +125,19 @@ async def main(
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: shutdown_event.set())
 
-    # Initialize Redis publisher if needed
+    # Set up in-process pub/sub (no Redis needed for combined process)
     publisher = None
+    subscriber = None
+    notification_queue: Optional[asyncio.Queue] = None
+
     if run_sched or run_discord:
-        try:
-            from src.notifications.redis_bridge import OpportunityPublisher
-            publisher = OpportunityPublisher()
-            await publisher.connect()
-            logger.info("Redis publisher connected")
-        except Exception as e:
-            logger.warning("Redis not available, notifications disabled", error=str(e))
+        from src.notifications.redis_bridge import InProcessPublisher, InProcessSubscriber
+        notification_queue = asyncio.Queue()
+        publisher = InProcessPublisher(notification_queue)
+        subscriber = InProcessSubscriber(notification_queue)
+        await publisher.connect()
+        await subscriber.connect()
+        logger.info("In-process notification queue initialized (no Redis needed)")
 
     tasks = []
 
@@ -150,8 +158,8 @@ async def main(
         tasks.append(asyncio.create_task(run_scheduler(publisher)))
 
     # Start Discord bot
-    if run_discord and publisher:
-        tasks.append(asyncio.create_task(run_discord_bot(publisher)))
+    if run_discord and subscriber:
+        tasks.append(asyncio.create_task(run_discord_bot(subscriber)))
 
     # Wait for all tasks or shutdown
     if tasks:
@@ -162,7 +170,9 @@ async def main(
 
     # Cleanup
     if publisher:
-        await publisher.disconnect()
+        await publisher.close()
+    if subscriber:
+        await subscriber.close()
 
     logger.info("All services stopped")
 
