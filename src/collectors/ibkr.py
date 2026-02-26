@@ -194,7 +194,13 @@ class IBKRCollector(BaseCollector):
         except (ValueError, TypeError):
             interest = 0
 
-        total_volume = Decimal(str(volume or interest))
+        try:
+            if volume:
+                total_volume = Decimal(str(volume))
+            else:
+                total_volume = Decimal(str(interest))
+        except (ValueError, TypeError, InvalidOperation):
+            total_volume = Decimal("0")
 
         # Determine category
         category = CATEGORY_MAP.get(key, "Economics")
