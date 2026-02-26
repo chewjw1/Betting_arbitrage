@@ -284,9 +284,11 @@ class LogicalArbitrageDetector:
         # Check for complement violations within each platform
         # IMPORTANT: Skip PredictIt - their YES+NO often > 1.0 due to bid-ask spread
         # and you can't short to exploit it (also 15%+ fees make it unprofitable)
+        # IMPORTANT: Skip IBKR - their public API only shows indicative prices,
+        # not real bid/ask data. The yesQuote/noQuote fields are often 0.
         for platform, platform_markets in by_platform.items():
-            # Skip PredictIt complement checks entirely
-            if platform.lower() == "predictit":
+            # Skip PredictIt and IBKR complement checks entirely
+            if platform.lower() in ("predictit", "ibkr"):
                 continue
 
             for market in platform_markets:
