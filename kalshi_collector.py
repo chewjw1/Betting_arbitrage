@@ -40,7 +40,7 @@ SERIES = [
 # Lag tracking settings
 MOVE_THRESHOLD_PCT = 0.03  # Minimum BTC move to track (0.03% = ~$30 on $100k BTC)
 LAG_TIMEOUT_SECS = 15      # Stop tracking lag after this many seconds
-PRICE_HISTORY_SIZE = 60    # Keep 60 seconds of price history
+PRICE_HISTORY_SIZE = 300   # Keep 5 minutes of price history for momentum/volatility
 
 
 class LagTracker:
@@ -152,6 +152,47 @@ class LagTracker:
             "caught_up": 0,
             "timeouts": len(timeouts),
         }
+
+    def get_momentum_volatility(self, ts):
+        """Calculate momentum and volatility signals from price history."""
+        if len(self.price_history) < 10:
+            return {}
+
+        now_price = self.price_history[-1]["price"]
+        signals = {}
+
+        # Calculate for different lookback periods
+        for label, secs in [("1m", 60), ("5m", 300)]:
+            # Get prices within lookback window
+            cutoff = ts - secs
+            window_prices = [p["price"] for p in self.price_history if p["ts"] >= cutoff]
+
+            if len(window_prices) >= 5:
+                old_price = window_prices[0]
+                high = max(window_prices)
+                low = min(window_prices)
+
+                # Momentum: % change from start of window
+                momentum = (now_price - old_price) / old_price * 100
+                signals[f"momentum_{label}"] = round(momentum, 4)
+
+                # Volatility: high-low range as % of price
+                volatility = (high - low) / old_price * 100
+                signals[f"volatility_{label}"] = round(volatility, 4)
+
+                # Trend strength: how much of the range was "used" by the move
+                if high != low:
+                    trend_strength = abs(now_price - old_price) / (high - low)
+                    signals[f"trend_strength_{label}"] = round(trend_strength, 3)
+
+        # Current position in recent range (0 = at low, 1 = at high)
+        if len(self.price_history) >= 60:
+            recent = [p["price"] for p in list(self.price_history)[-60:]]
+            high, low = max(recent), min(recent)
+            if high != low:
+                signals["range_position"] = round((now_price - low) / (high - low), 3)
+
+        return signals
 
 
 def get_btc_price():
@@ -318,10 +359,15 @@ def main():
                         print(f"    >>> TIMEOUT: Kalshi didn't adjust after {LAG_TIMEOUT_SECS}s")
                     lag_f.flush()
 
+                # Get momentum/volatility signals
+                signals = lag_tracker.get_momentum_volatility(ts)
+
                 # Write to file
                 for tick in ticks:
                     # Add lag tracking info to tick
                     tick["active_lag_events"] = len(lag_tracker.active_events)
+                    # Add momentum/volatility signals
+                    tick.update(signals)
                     f.write(json.dumps(tick) + "\n")
                     tick_count += 1
 
@@ -355,12 +401,15 @@ def main():
                         dist_str = f"{dist:+.3f}%" if dist is not None else "N/A"
                         direction = "↑" if dist and dist > 0 else "↓"
                         lag_indicator = f"[{len(lag_tracker.active_events)} pending]" if lag_tracker.active_events else ""
+                        mom_1m = tick.get("momentum_1m", 0)
+                        mom_str = f"mom:{mom_1m:+.2f}%" if mom_1m else ""
+                        btc_str = f"${tick['btc_price']:,.0f}" if tick.get('btc_price') else "N/A"
                         print(
                             f"{tick['time_utc'].split()[1]} | "
-                            f"BTC: ${tick['btc_price']:,.0f} {direction}{dist_str} | "
+                            f"BTC: {btc_str} {direction}{dist_str} | "
                             f"T-{tick['secs_remaining']:4}s | "
                             f"YES: {tick['yes_bid']*100:5.1f}/{tick['yes_ask']*100:5.1f}c "
-                            f"{lag_indicator}"
+                            f"{mom_str} {lag_indicator}"
                         )
                         break  # Only show one 15M market per tick
 

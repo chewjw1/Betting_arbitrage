@@ -139,6 +139,136 @@ def analyze_main_data(filepath):
             print(f"  Avg spread: {sum(far_spreads)/len(far_spreads)*100:.2f}c")
 
 
+def analyze_signals(filepath):
+    """Analyze momentum/volatility signals vs outcomes."""
+    print(f"\n{'='*70}")
+    print("SIGNAL ANALYSIS (Momentum/Volatility vs Outcomes)")
+    print(f"{'='*70}")
+
+    ticks = []
+    with open(filepath) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    ticks.append(json.loads(line))
+                except:
+                    pass
+
+    # Check if signals exist
+    sample = ticks[0] if ticks else {}
+    if "momentum_1m" not in sample:
+        print("\nNo momentum/volatility signals in this data.")
+        print("Run updated collector to capture these signals.")
+        return
+
+    # Group by ticker to find window outcomes
+    by_ticker = defaultdict(list)
+    for t in ticks:
+        if "15M" in t.get("ticker", ""):
+            by_ticker[t.get("ticker")].append(t)
+
+    # For each window, get opening signals and final outcome
+    window_data = []
+    for ticker, ticker_ticks in by_ticker.items():
+        # Get opening tick (around 800-900 seconds remaining)
+        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
+        # Get closing tick (0-10 seconds remaining)
+        closing = [t for t in ticker_ticks if t.get("secs_remaining", 999) <= 10]
+
+        if opening and closing:
+            open_tick = opening[0]
+            close_tick = closing[-1]
+            final_yes = close_tick.get("yes_mid", 0.5)
+
+            outcome = "UP" if final_yes > 0.9 else "DOWN" if final_yes < 0.1 else "UNCERTAIN"
+            if outcome == "UNCERTAIN":
+                continue
+
+            window_data.append({
+                "ticker": ticker,
+                "outcome": outcome,
+                "open_yes": open_tick.get("yes_mid", 0.5),
+                "momentum_1m": open_tick.get("momentum_1m", 0),
+                "momentum_5m": open_tick.get("momentum_5m", 0),
+                "volatility_1m": open_tick.get("volatility_1m", 0),
+                "volatility_5m": open_tick.get("volatility_5m", 0),
+                "distance_pct": open_tick.get("distance_pct", 0),
+            })
+
+    if not window_data:
+        print("\nNot enough window data with signals.")
+        return
+
+    print(f"\nWindows with signal data: {len(window_data)}")
+
+    # Analyze by momentum
+    print(f"\n--- BY 1-MINUTE MOMENTUM ---")
+    bullish = [w for w in window_data if w["momentum_1m"] > 0.02]
+    bearish = [w for w in window_data if w["momentum_1m"] < -0.02]
+    neutral = [w for w in window_data if -0.02 <= w["momentum_1m"] <= 0.02]
+
+    for label, group in [("Bullish (>+0.02%)", bullish), ("Bearish (<-0.02%)", bearish), ("Neutral", neutral)]:
+        if group:
+            up_rate = len([w for w in group if w["outcome"] == "UP"]) / len(group) * 100
+            avg_yes = sum(w["open_yes"] for w in group) / len(group) * 100
+            edge = up_rate - avg_yes
+            print(f"\n{label}: {len(group)} windows")
+            print(f"  Actual UP rate: {up_rate:.1f}%")
+            print(f"  Market implied (avg YES): {avg_yes:.1f}%")
+            print(f"  Edge: {edge:+.1f}%")
+            if abs(edge) > 10:
+                print(f"  >>> POTENTIAL EDGE: Bet {'YES' if edge > 0 else 'NO'}")
+
+    # Analyze by volatility
+    print(f"\n--- BY 5-MINUTE VOLATILITY ---")
+    high_vol = [w for w in window_data if w["volatility_5m"] > 0.1]
+    low_vol = [w for w in window_data if w["volatility_5m"] <= 0.1]
+
+    for label, group in [("High volatility (>0.1%)", high_vol), ("Low volatility (<=0.1%)", low_vol)]:
+        if group:
+            up_rate = len([w for w in group if w["outcome"] == "UP"]) / len(group) * 100
+            avg_yes = sum(w["open_yes"] for w in group) / len(group) * 100
+            edge = up_rate - avg_yes
+            print(f"\n{label}: {len(group)} windows")
+            print(f"  Actual UP rate: {up_rate:.1f}%")
+            print(f"  Market implied: {avg_yes:.1f}%")
+            print(f"  Edge: {edge:+.1f}%")
+
+    # Analyze by distance from target
+    print(f"\n--- BY DISTANCE FROM TARGET ---")
+    far_above = [w for w in window_data if w["distance_pct"] and w["distance_pct"] > 0.1]
+    far_below = [w for w in window_data if w["distance_pct"] and w["distance_pct"] < -0.1]
+    close = [w for w in window_data if w["distance_pct"] and abs(w["distance_pct"]) <= 0.1]
+
+    for label, group in [("Far above target (>+0.1%)", far_above), ("Far below target (<-0.1%)", far_below), ("Close to target", close)]:
+        if group:
+            up_rate = len([w for w in group if w["outcome"] == "UP"]) / len(group) * 100
+            avg_yes = sum(w["open_yes"] for w in group) / len(group) * 100
+            edge = up_rate - avg_yes
+            print(f"\n{label}: {len(group)} windows")
+            print(f"  Actual UP rate: {up_rate:.1f}%")
+            print(f"  Market implied: {avg_yes:.1f}%")
+            print(f"  Edge: {edge:+.1f}%")
+
+    # Combined signals
+    print(f"\n--- COMBINED SIGNALS ---")
+    # Bullish momentum + above target = strong YES?
+    strong_yes = [w for w in window_data if w["momentum_1m"] > 0.02 and w.get("distance_pct", 0) > 0.05]
+    strong_no = [w for w in window_data if w["momentum_1m"] < -0.02 and w.get("distance_pct", 0) < -0.05]
+
+    if strong_yes:
+        up_rate = len([w for w in strong_yes if w["outcome"] == "UP"]) / len(strong_yes) * 100
+        avg_yes = sum(w["open_yes"] for w in strong_yes) / len(strong_yes) * 100
+        print(f"\nBullish momentum + above target: {len(strong_yes)} windows")
+        print(f"  UP rate: {up_rate:.1f}% vs market {avg_yes:.1f}% (edge: {up_rate-avg_yes:+.1f}%)")
+
+    if strong_no:
+        down_rate = len([w for w in strong_no if w["outcome"] == "DOWN"]) / len(strong_no) * 100
+        avg_no = (1 - sum(w["open_yes"] for w in strong_no) / len(strong_no)) * 100
+        print(f"\nBearish momentum + below target: {len(strong_no)} windows")
+        print(f"  DOWN rate: {down_rate:.1f}% vs market {avg_no:.1f}% (edge: {down_rate-avg_no:+.1f}%)")
+
+
 def analyze_lag_data(filepath):
     """Analyze the lag events file."""
     print(f"\n{'='*70}")
@@ -225,6 +355,7 @@ def main():
             analyze_lag_data(filepath)
         else:
             analyze_main_data(filepath)
+            analyze_signals(filepath)  # Run signal analysis on main data
 
     print(f"\n{'='*70}")
     print("COPY EVERYTHING ABOVE AND PASTE TO CLAUDE FOR ANALYSIS")
