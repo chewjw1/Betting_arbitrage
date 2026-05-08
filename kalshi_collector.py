@@ -36,6 +36,21 @@ SERIES = [
 ]
 
 
+def get_btc_price():
+    """Fetch current BTC price from Binance."""
+    try:
+        resp = requests.get(
+            "https://api.binance.us/api/v3/ticker/price",
+            params={"symbol": "BTCUSDT"},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            return float(resp.json()["price"])
+    except:
+        pass
+    return None
+
+
 def get_active_markets():
     """Fetch all active BTC markets."""
     markets = []
@@ -58,7 +73,7 @@ def get_active_markets():
     return markets
 
 
-def collect_tick(markets):
+def collect_tick(markets, btc_price):
     """Collect one tick of data for all markets."""
     ts = time.time()
     now = datetime.now(timezone.utc)
@@ -84,12 +99,20 @@ def collect_tick(markets):
 
         target = float(m.get("floor_strike", 0) or 0)
 
+        # Calculate distance from target
+        if target > 0 and btc_price:
+            distance_pct = (btc_price - target) / target * 100
+        else:
+            distance_pct = None
+
         tick = {
             "ts": ts,
             "time_utc": now.strftime("%Y-%m-%d %H:%M:%S"),
             "ticker": ticker,
             "series": ticker.split("-")[0] if "-" in ticker else ticker,
+            "btc_price": btc_price,
             "target_price": target,
+            "distance_pct": distance_pct,
             "secs_remaining": secs_remaining,
             "yes_bid": yes_bid,
             "yes_ask": yes_ask,
@@ -125,7 +148,8 @@ def main():
             while True:
                 loop_start = time.time()
 
-                # Get active markets
+                # Get BTC price and active markets
+                btc_price = get_btc_price()
                 markets = get_active_markets()
 
                 if not markets:
@@ -134,7 +158,7 @@ def main():
                     continue
 
                 # Collect ticks
-                ticks = collect_tick(markets)
+                ticks = collect_tick(markets, btc_price)
 
                 # Write to file
                 for tick in ticks:
@@ -167,14 +191,16 @@ def main():
                 # Display status
                 for tick in ticks:
                     if "15M" in tick["ticker"]:  # Only show 15M for brevity
-                        direction = "↑" if tick["yes_mid"] > 0.5 else "↓"
+                        dist = tick.get("distance_pct")
+                        dist_str = f"{dist:+.3f}%" if dist is not None else "N/A"
+                        direction = "↑" if dist and dist > 0 else "↓"
                         print(
                             f"{tick['time_utc'].split()[1]} | "
-                            f"{tick['ticker'][-15:]} | "
+                            f"BTC: ${tick['btc_price']:,.0f} {direction}{dist_str} | "
                             f"T-{tick['secs_remaining']:4}s | "
-                            f"YES: {tick['yes_bid']*100:5.1f}/{tick['yes_ask']*100:5.1f}c | "
-                            f"Spread: {tick['spread']*100:.1f}c"
+                            f"YES: {tick['yes_bid']*100:5.1f}/{tick['yes_ask']*100:5.1f}c"
                         )
+                        break  # Only show one 15M market per tick
 
                 # Flush periodically
                 if tick_count % 60 == 0:
