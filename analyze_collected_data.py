@@ -46,6 +46,16 @@ def analyze_main_data(filepath):
     markets_15m = {k: v for k, v in by_ticker.items() if '15M' in k}
     print(f"15M markets: {len(markets_15m)}")
 
+    # Group by asset
+    by_asset = defaultdict(list)
+    for t in ticks:
+        asset = t.get('asset', 'BTC')  # Default to BTC for old data
+        if asset:
+            by_asset[asset].append(t)
+
+    if len(by_asset) > 1:
+        print(f"\nAssets tracked: {', '.join(sorted(by_asset.keys()))}")
+
     # Price movement analysis
     btc_prices = [t['btc_price'] for t in ticks if t.get('btc_price')]
     if btc_prices:
@@ -110,6 +120,48 @@ def analyze_main_data(filepath):
         print(f"  UP (YES > 90c):   {outcomes['UP']} ({outcomes['UP']/total_windows*100:.1f}%)")
         print(f"  DOWN (YES < 10c): {outcomes['DOWN']} ({outcomes['DOWN']/total_windows*100:.1f}%)")
         print(f"  UNCERTAIN:        {outcomes['UNCERTAIN']} ({outcomes['UNCERTAIN']/total_windows*100:.1f}%)")
+
+    # Outcomes by asset
+    print(f"\n{'='*70}")
+    print("OUTCOMES BY ASSET")
+    print(f"{'='*70}")
+
+    asset_outcomes = defaultdict(lambda: {"UP": 0, "DOWN": 0, "UNCERTAIN": 0, "spreads": []})
+    for ticker, ticker_ticks in markets_15m.items():
+        # Get asset from ticker
+        asset = None
+        for a in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'BCH', 'ADA', 'HYPE']:
+            if a in ticker.upper():
+                asset = a
+                break
+        if not asset:
+            asset = ticker_ticks[0].get('asset', 'UNKNOWN') if ticker_ticks else 'UNKNOWN'
+
+        final_ticks = [t for t in ticker_ticks if t.get('secs_remaining', 999) <= 5]
+        if final_ticks:
+            final_yes = final_ticks[-1].get('yes_mid', 0.5)
+            if final_yes > 0.9:
+                asset_outcomes[asset]["UP"] += 1
+            elif final_yes < 0.1:
+                asset_outcomes[asset]["DOWN"] += 1
+            else:
+                asset_outcomes[asset]["UNCERTAIN"] += 1
+
+        # Track average spread
+        spreads = [t.get('spread', 0) for t in ticker_ticks if t.get('spread')]
+        if spreads:
+            asset_outcomes[asset]["spreads"].extend(spreads)
+
+    print(f"\n{'Asset':<8} {'Windows':<10} {'UP':<12} {'DOWN':<12} {'Avg Spread':<12}")
+    print("-" * 60)
+    for asset in sorted(asset_outcomes.keys()):
+        data = asset_outcomes[asset]
+        total = data["UP"] + data["DOWN"] + data["UNCERTAIN"]
+        if total > 0:
+            up_pct = data["UP"] / total * 100
+            down_pct = data["DOWN"] / total * 100
+            avg_spread = sum(data["spreads"]) / len(data["spreads"]) * 100 if data["spreads"] else 0
+            print(f"{asset:<8} {total:<10} {data['UP']:>3} ({up_pct:4.0f}%)   {data['DOWN']:>3} ({down_pct:4.0f}%)   {avg_spread:>6.2f}c")
 
     # Spread analysis
     print(f"\n{'='*70}")

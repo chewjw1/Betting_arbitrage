@@ -30,12 +30,31 @@ except ImportError:
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
-# Market series to track
+# Market series to track (15-minute markets for multiple cryptos)
 SERIES = [
-    "KXBTC15M",   # 15-minute BTC markets
-    "KXBTC",       # Hourly BTC markets (if available)
-    "KXBTCD",      # Daily BTC markets (if available)
+    "KXBTC15M",   # Bitcoin 15M
+    "KXETH15M",   # Ethereum 15M
+    "KXSOL15M",   # Solana 15M
+    "KXXRP15M",   # XRP 15M
+    "KXDOGE15M",  # Dogecoin 15M
+    "KXBNB15M",   # BNB 15M
+    "KXBCH15M",   # Bitcoin Cash 15M
+    "KXADA15M",   # Cardano 15M
+    "KXHYPE15M",  # Hype 15M
 ]
+
+# Spot price sources for each asset
+SPOT_SOURCES = {
+    "BTC": "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT",
+    "ETH": "https://api.binance.us/api/v3/ticker/price?symbol=ETHUSDT",
+    "SOL": "https://api.binance.us/api/v3/ticker/price?symbol=SOLUSDT",
+    "XRP": "https://api.binance.us/api/v3/ticker/price?symbol=XRPUSDT",
+    "DOGE": "https://api.binance.us/api/v3/ticker/price?symbol=DOGEUSDT",
+    "BNB": "https://api.binance.us/api/v3/ticker/price?symbol=BNBUSDT",
+    "BCH": "https://api.binance.us/api/v3/ticker/price?symbol=BCHUSDT",
+    "ADA": "https://api.binance.us/api/v3/ticker/price?symbol=ADAUSDT",
+    "HYPE": None,  # No Binance listing - skip spot tracking
+}
 
 # Lag tracking settings
 MOVE_THRESHOLD_PCT = 0.03  # Minimum BTC move to track (0.03% = ~$30 on $100k BTC)
@@ -195,18 +214,27 @@ class LagTracker:
         return signals
 
 
-def get_btc_price():
-    """Fetch current BTC price from Binance."""
-    try:
-        resp = requests.get(
-            "https://api.binance.us/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=5
-        )
-        if resp.status_code == 200:
-            return float(resp.json()["price"])
-    except:
-        pass
+def get_spot_prices():
+    """Fetch current spot prices for all tracked assets from Binance."""
+    prices = {}
+    for asset, url in SPOT_SOURCES.items():
+        if url is None:
+            continue
+        try:
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                prices[asset] = float(resp.json()["price"])
+        except:
+            pass
+    return prices
+
+
+def get_asset_from_ticker(ticker):
+    """Extract asset name from Kalshi ticker (e.g., KXBTC15M-... -> BTC)."""
+    ticker_upper = ticker.upper()
+    for asset in SPOT_SOURCES.keys():
+        if asset in ticker_upper:
+            return asset
     return None
 
 
@@ -232,7 +260,7 @@ def get_active_markets():
     return markets
 
 
-def collect_tick(markets, btc_price):
+def collect_tick(markets, spot_prices):
     """Collect one tick of data for all markets."""
     ts = time.time()
     now = datetime.now(timezone.utc)
@@ -241,6 +269,8 @@ def collect_tick(markets, btc_price):
 
     for m in markets:
         ticker = m.get("ticker", "")
+        asset = get_asset_from_ticker(ticker)
+        spot_price = spot_prices.get(asset) if asset else None
 
         # Parse close time
         close_time_str = m.get("close_time", "")
@@ -259,8 +289,8 @@ def collect_tick(markets, btc_price):
         target = float(m.get("floor_strike", 0) or 0)
 
         # Calculate distance from target
-        if target > 0 and btc_price:
-            distance_pct = (btc_price - target) / target * 100
+        if target > 0 and spot_price:
+            distance_pct = (spot_price - target) / target * 100
         else:
             distance_pct = None
 
@@ -269,7 +299,8 @@ def collect_tick(markets, btc_price):
             "time_utc": now.strftime("%Y-%m-%d %H:%M:%S"),
             "ticker": ticker,
             "series": ticker.split("-")[0] if "-" in ticker else ticker,
-            "btc_price": btc_price,
+            "asset": asset,
+            "spot_price": spot_price,
             "target_price": target,
             "distance_pct": distance_pct,
             "secs_remaining": secs_remaining,
@@ -314,11 +345,12 @@ def main():
                 loop_start = time.time()
                 ts = time.time()
 
-                # Get BTC price and active markets
-                btc_price = get_btc_price()
+                # Get spot prices and active markets
+                spot_prices = get_spot_prices()
+                btc_price = spot_prices.get("BTC")  # For lag tracking (BTC only)
                 markets = get_active_markets()
 
-                # --- LAG TRACKING ---
+                # --- LAG TRACKING (BTC only for now) ---
                 # Record price for history
                 lag_tracker.add_price(ts, btc_price)
 
@@ -331,7 +363,7 @@ def main():
                     continue
 
                 # Collect ticks
-                ticks = collect_tick(markets, btc_price)
+                ticks = collect_tick(markets, spot_prices)
 
                 # Get primary market YES mid for lag tracking
                 primary_yes_mid = None
@@ -394,24 +426,31 @@ def main():
                         print(f"\n>>> WINDOW SETTLED: {ticker}")
                         print(f"    Final YES: {tick['yes_mid']*100:.1f}c")
 
-                # Display status
+                # Display status - show one market per asset
+                shown_assets = set()
                 for tick in ticks:
-                    if "15M" in tick["ticker"]:  # Only show 15M for brevity
+                    asset = tick.get("asset", "")
+                    if "15M" in tick["ticker"] and asset and asset not in shown_assets:
+                        shown_assets.add(asset)
                         dist = tick.get("distance_pct")
-                        dist_str = f"{dist:+.3f}%" if dist is not None else "N/A"
+                        dist_str = f"{dist:+.2f}%" if dist is not None else "N/A"
                         direction = "↑" if dist and dist > 0 else "↓"
-                        lag_indicator = f"[{len(lag_tracker.active_events)} pending]" if lag_tracker.active_events else ""
+                        spot = tick.get("spot_price")
+                        if asset == "BTC":
+                            spot_str = f"${spot:,.0f}" if spot else "N/A"
+                        elif asset in ["ETH", "SOL", "BNB", "BCH"]:
+                            spot_str = f"${spot:,.2f}" if spot else "N/A"
+                        else:
+                            spot_str = f"${spot:.4f}" if spot else "N/A"
                         mom_1m = tick.get("momentum_1m", 0)
-                        mom_str = f"mom:{mom_1m:+.2f}%" if mom_1m else ""
-                        btc_str = f"${tick['btc_price']:,.0f}" if tick.get('btc_price') else "N/A"
+                        mom_str = f"m:{mom_1m:+.2f}%" if mom_1m else ""
                         print(
                             f"{tick['time_utc'].split()[1]} | "
-                            f"BTC: {btc_str} {direction}{dist_str} | "
+                            f"{asset:4} {spot_str:>10} {direction}{dist_str:>7} | "
                             f"T-{tick['secs_remaining']:4}s | "
-                            f"YES: {tick['yes_bid']*100:5.1f}/{tick['yes_ask']*100:5.1f}c "
-                            f"{mom_str} {lag_indicator}"
+                            f"YES:{tick['yes_bid']*100:4.0f}/{tick['yes_ask']*100:4.0f}c "
+                            f"{mom_str}"
                         )
-                        break  # Only show one 15M market per tick
 
                 # Flush periodically
                 if tick_count % 60 == 0:
