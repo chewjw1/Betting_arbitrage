@@ -214,8 +214,10 @@ def analyze_edge_opportunities(filepath):
 
     windows = []
     for ticker, ticker_ticks in by_ticker.items():
-        # Get opening tick (800-900s remaining)
-        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
+        # Get opening tick (800-900s remaining) - prefer one with momentum signals
+        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900 and t.get("momentum_1m") is not None]
+        if not opening:
+            opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
         # Get closing tick
         closing = [t for t in ticker_ticks if t.get("secs_remaining", 999) <= 5]
 
@@ -428,9 +430,14 @@ def analyze_signals(filepath):
                 except:
                     pass
 
-    # Check if signals exist
-    sample = ticks[0] if ticks else {}
-    if "momentum_1m" not in sample:
+    # Check if signals exist (check multiple ticks since first few won't have signals)
+    has_signals = False
+    for t in ticks[100:200]:  # Check ticks after warmup period
+        if "momentum_1m" in t:
+            has_signals = True
+            break
+
+    if not has_signals:
         print("\nNo momentum/volatility signals in this data.")
         print("Run updated collector to capture these signals.")
         return
