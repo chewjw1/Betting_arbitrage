@@ -191,6 +191,228 @@ def analyze_main_data(filepath):
             print(f"  Avg spread: {sum(far_spreads)/len(far_spreads)*100:.2f}c")
 
 
+def analyze_edge_opportunities(filepath):
+    """Find systematic mispricings - where actual outcomes differ from market price."""
+    print(f"\n{'='*70}")
+    print("EDGE ANALYSIS: Where Does Market Misprice?")
+    print(f"{'='*70}")
+
+    ticks = []
+    with open(filepath) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    ticks.append(json.loads(line))
+                except:
+                    pass
+
+    # Build window outcomes with opening data
+    by_ticker = defaultdict(list)
+    for t in ticks:
+        if "15M" in t.get("ticker", ""):
+            by_ticker[t.get("ticker")].append(t)
+
+    windows = []
+    for ticker, ticker_ticks in by_ticker.items():
+        # Get opening tick (800-900s remaining)
+        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
+        # Get closing tick
+        closing = [t for t in ticker_ticks if t.get("secs_remaining", 999) <= 5]
+
+        if opening and closing:
+            open_tick = opening[0]
+            close_tick = closing[-1]
+            final_yes = close_tick.get("yes_mid", 0.5)
+
+            outcome = "UP" if final_yes > 0.9 else "DOWN" if final_yes < 0.1 else None
+            if outcome is None:
+                continue
+
+            # Extract hour from UTC time
+            time_str = open_tick.get("time_utc", "")
+            try:
+                hour = int(time_str.split()[1].split(":")[0])
+            except:
+                hour = -1
+
+            # Get asset
+            asset = open_tick.get("asset")
+            if not asset:
+                for a in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'BCH', 'ADA', 'HYPE']:
+                    if a in ticker.upper():
+                        asset = a
+                        break
+
+            windows.append({
+                "ticker": ticker,
+                "asset": asset or "UNKNOWN",
+                "outcome": outcome,
+                "outcome_binary": 1 if outcome == "UP" else 0,
+                "open_yes": open_tick.get("yes_mid", 0.5),
+                "hour_utc": hour,
+                "distance_pct": open_tick.get("distance_pct"),
+                "momentum_1m": open_tick.get("momentum_1m"),
+                "momentum_5m": open_tick.get("momentum_5m"),
+                "volatility_5m": open_tick.get("volatility_5m"),
+                "spread": open_tick.get("spread", 0),
+            })
+
+    if len(windows) < 5:
+        print(f"\nOnly {len(windows)} windows - need more data.")
+        return
+
+    print(f"\nTotal windows analyzed: {len(windows)}")
+
+    # === 1. MARKET EFFICIENCY CHECK ===
+    print(f"\n--- MARKET EFFICIENCY CHECK ---")
+    print("Does market price = actual probability?")
+
+    # Bucket by opening YES price
+    buckets = [
+        ("YES 0-20c (market says DOWN)", 0, 0.2),
+        ("YES 20-40c", 0.2, 0.4),
+        ("YES 40-60c (coin flip)", 0.4, 0.6),
+        ("YES 60-80c", 0.6, 0.8),
+        ("YES 80-100c (market says UP)", 0.8, 1.0),
+    ]
+
+    print(f"\n{'Price Bucket':<35} {'N':<5} {'Actual UP%':<12} {'Market%':<12} {'Edge':<10}")
+    print("-" * 75)
+
+    for label, low, high in buckets:
+        bucket_windows = [w for w in windows if low <= w["open_yes"] < high]
+        if len(bucket_windows) >= 2:
+            actual_up = sum(w["outcome_binary"] for w in bucket_windows) / len(bucket_windows) * 100
+            market_implied = sum(w["open_yes"] for w in bucket_windows) / len(bucket_windows) * 100
+            edge = actual_up - market_implied
+            flag = "***" if abs(edge) > 15 else ""
+            print(f"{label:<35} {len(bucket_windows):<5} {actual_up:>8.1f}%    {market_implied:>8.1f}%    {edge:>+7.1f}% {flag}")
+
+    # === 2. ASSET EFFICIENCY ===
+    print(f"\n--- ASSET EFFICIENCY ---")
+    print("Which coins have sloppier markets?")
+
+    asset_data = defaultdict(list)
+    for w in windows:
+        asset_data[w["asset"]].append(w)
+
+    print(f"\n{'Asset':<8} {'N':<5} {'Actual UP%':<12} {'Avg Spread':<12} {'Efficiency':<15}")
+    print("-" * 60)
+
+    for asset in sorted(asset_data.keys()):
+        aws = asset_data[asset]
+        if len(aws) >= 2:
+            actual_up = sum(w["outcome_binary"] for w in aws) / len(aws) * 100
+            avg_spread = sum(w["spread"] for w in aws) / len(aws) * 100
+            # Efficiency = how close is actual to market implied
+            market_avg = sum(w["open_yes"] for w in aws) / len(aws) * 100
+            efficiency_error = abs(actual_up - market_avg)
+            efficiency = "EFFICIENT" if efficiency_error < 10 else "INEFFICIENT ***"
+            print(f"{asset:<8} {len(aws):<5} {actual_up:>8.1f}%    {avg_spread:>8.2f}c    {efficiency}")
+
+    # === 3. TIME OF DAY EFFECT ===
+    print(f"\n--- TIME OF DAY EFFECT (UTC) ---")
+    print("Are certain hours less efficient?")
+
+    hour_data = defaultdict(list)
+    for w in windows:
+        if w["hour_utc"] >= 0:
+            hour_data[w["hour_utc"]].append(w)
+
+    print(f"\n{'Hour':<8} {'N':<5} {'Actual UP%':<12} {'Market%':<12} {'Edge':<10}")
+    print("-" * 55)
+
+    for hour in sorted(hour_data.keys()):
+        hws = hour_data[hour]
+        if len(hws) >= 2:
+            actual_up = sum(w["outcome_binary"] for w in hws) / len(hws) * 100
+            market_implied = sum(w["open_yes"] for w in hws) / len(hws) * 100
+            edge = actual_up - market_implied
+            flag = "***" if abs(edge) > 15 else ""
+            print(f"{hour:02d}:00    {len(hws):<5} {actual_up:>8.1f}%    {market_implied:>8.1f}%    {edge:>+7.1f}% {flag}")
+
+    # === 4. LATE GAME ANALYSIS ===
+    print(f"\n--- LATE GAME ANALYSIS ---")
+    print("When market shows >80% confidence, does it hold?")
+
+    high_confidence = [w for w in windows if w["open_yes"] > 0.8 or w["open_yes"] < 0.2]
+    if high_confidence:
+        # For YES > 80%, check if UP actually happens
+        yes_high = [w for w in windows if w["open_yes"] > 0.8]
+        yes_low = [w for w in windows if w["open_yes"] < 0.2]
+
+        if yes_high:
+            hit_rate = sum(w["outcome_binary"] for w in yes_high) / len(yes_high) * 100
+            avg_price = sum(w["open_yes"] for w in yes_high) / len(yes_high) * 100
+            print(f"\nYES > 80c (expecting UP): {len(yes_high)} windows")
+            print(f"  Actual UP rate: {hit_rate:.1f}%")
+            print(f"  Average price paid: {avg_price:.1f}c")
+            print(f"  Edge: {hit_rate - avg_price:+.1f}%")
+            if hit_rate > avg_price + 5:
+                print(f"  >>> POTENTIAL EDGE: Market underprices high-confidence UP")
+            elif hit_rate < avg_price - 5:
+                print(f"  >>> MARKET OVERCONFIDENT: Bet NO when YES > 80c")
+
+        if yes_low:
+            hit_rate = sum(1 - w["outcome_binary"] for w in yes_low) / len(yes_low) * 100
+            avg_price = sum(1 - w["open_yes"] for w in yes_low) / len(yes_low) * 100
+            print(f"\nYES < 20c (expecting DOWN): {len(yes_low)} windows")
+            print(f"  Actual DOWN rate: {hit_rate:.1f}%")
+            print(f"  Average NO price: {avg_price:.1f}c")
+            print(f"  Edge: {hit_rate - avg_price:+.1f}%")
+
+    # === 5. DISTANCE FROM TARGET ===
+    print(f"\n--- DISTANCE FROM TARGET ---")
+    print("When spot is far from target, is market right?")
+
+    dist_windows = [w for w in windows if w["distance_pct"] is not None]
+    if dist_windows:
+        far_above = [w for w in dist_windows if w["distance_pct"] > 0.15]
+        far_below = [w for w in dist_windows if w["distance_pct"] < -0.15]
+        close = [w for w in dist_windows if abs(w["distance_pct"]) <= 0.05]
+
+        for label, group in [("Far ABOVE target (>+0.15%)", far_above),
+                             ("Far BELOW target (<-0.15%)", far_below),
+                             ("CLOSE to target (<0.05%)", close)]:
+            if len(group) >= 2:
+                actual_up = sum(w["outcome_binary"] for w in group) / len(group) * 100
+                market = sum(w["open_yes"] for w in group) / len(group) * 100
+                edge = actual_up - market
+                print(f"\n{label}: {len(group)} windows")
+                print(f"  Actual UP: {actual_up:.1f}% | Market: {market:.1f}% | Edge: {edge:+.1f}%")
+
+    # === 6. ACTIONABLE SUMMARY ===
+    print(f"\n{'='*70}")
+    print("ACTIONABLE SUMMARY")
+    print(f"{'='*70}")
+
+    edges_found = []
+
+    # Check each condition for significant edge
+    for asset, aws in asset_data.items():
+        if len(aws) >= 3:
+            actual = sum(w["outcome_binary"] for w in aws) / len(aws) * 100
+            market = sum(w["open_yes"] for w in aws) / len(aws) * 100
+            if abs(actual - market) > 15:
+                edges_found.append(f"{asset}: Actual {actual:.0f}% vs Market {market:.0f}% ({actual-market:+.0f}% edge)")
+
+    for hour, hws in hour_data.items():
+        if len(hws) >= 3:
+            actual = sum(w["outcome_binary"] for w in hws) / len(hws) * 100
+            market = sum(w["open_yes"] for w in hws) / len(hws) * 100
+            if abs(actual - market) > 20:
+                edges_found.append(f"Hour {hour:02d}:00 UTC: Actual {actual:.0f}% vs Market {market:.0f}% ({actual-market:+.0f}% edge)")
+
+    if edges_found:
+        print("\nPOTENTIAL EDGES DETECTED:")
+        for e in edges_found:
+            print(f"  - {e}")
+        print("\n⚠️  WARNING: Small sample sizes. Need 50+ windows per condition for confidence.")
+    else:
+        print("\nNo significant edges found. Market appears efficient.")
+        print("Keep collecting data or try different conditions.")
+
+
 def analyze_signals(filepath):
     """Analyze momentum/volatility signals vs outcomes."""
     print(f"\n{'='*70}")
@@ -407,7 +629,8 @@ def main():
             analyze_lag_data(filepath)
         else:
             analyze_main_data(filepath)
-            analyze_signals(filepath)  # Run signal analysis on main data
+            analyze_edge_opportunities(filepath)  # Core edge analysis
+            analyze_signals(filepath)  # Momentum/volatility signals
 
     print(f"\n{'='*70}")
     print("COPY EVERYTHING ABOVE AND PASTE TO CLAUDE FOR ANALYSIS")
