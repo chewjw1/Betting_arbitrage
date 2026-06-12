@@ -503,11 +503,13 @@ def analyze_signals(filepath):
                 "ticker": ticker,
                 "outcome": outcome,
                 "open_yes": _quoted_mid(open_tick),
-                "momentum_1m": _num(open_tick.get("momentum_1m")),
-                "momentum_5m": _num(open_tick.get("momentum_5m")),
-                "volatility_1m": _num(open_tick.get("volatility_1m")),
-                "volatility_5m": _num(open_tick.get("volatility_5m")),
-                "distance_pct": _num(open_tick.get("distance_pct")),
+                "momentum_1m": open_tick.get("momentum_1m"),
+                "momentum_5m": open_tick.get("momentum_5m"),
+                "volatility_1m": open_tick.get("volatility_1m"),
+                "volatility_5m": open_tick.get("volatility_5m"),
+                "distance_pct": open_tick.get("distance_pct"),
+                "spread": _num(open_tick.get("spread")),
+                "asset": open_tick.get("asset") or "UNKNOWN",
             })
 
     if not window_data:
@@ -518,9 +520,9 @@ def analyze_signals(filepath):
 
     # Analyze by momentum
     print(f"\n--- BY 1-MINUTE MOMENTUM ---")
-    bullish = [w for w in window_data if w["momentum_1m"] > 0.02]
-    bearish = [w for w in window_data if w["momentum_1m"] < -0.02]
-    neutral = [w for w in window_data if -0.02 <= w["momentum_1m"] <= 0.02]
+    bullish = [w for w in window_data if (w.get("momentum_1m") or 0) > 0.02]
+    bearish = [w for w in window_data if (w.get("momentum_1m") or 0) < -0.02]
+    neutral = [w for w in window_data if w.get("momentum_1m") is not None and -0.02 <= w["momentum_1m"] <= 0.02]
 
     for label, group in [("Bullish (>+0.02%)", bullish), ("Bearish (<-0.02%)", bearish), ("Neutral", neutral)]:
         if group:
@@ -536,8 +538,8 @@ def analyze_signals(filepath):
 
     # Analyze by volatility
     print(f"\n--- BY 5-MINUTE VOLATILITY ---")
-    high_vol = [w for w in window_data if w["volatility_5m"] > 0.1]
-    low_vol = [w for w in window_data if w["volatility_5m"] <= 0.1]
+    high_vol = [w for w in window_data if (w.get("volatility_5m") or 0) > 0.1]
+    low_vol = [w for w in window_data if w.get("volatility_5m") is not None and w["volatility_5m"] <= 0.1]
 
     for label, group in [("High volatility (>0.1%)", high_vol), ("Low volatility (<=0.1%)", low_vol)]:
         if group:
@@ -551,9 +553,9 @@ def analyze_signals(filepath):
 
     # Analyze by distance from target
     print(f"\n--- BY DISTANCE FROM TARGET ---")
-    far_above = [w for w in window_data if w["distance_pct"] and w["distance_pct"] > 0.1]
-    far_below = [w for w in window_data if w["distance_pct"] and w["distance_pct"] < -0.1]
-    close = [w for w in window_data if w["distance_pct"] and abs(w["distance_pct"]) <= 0.1]
+    far_above = [w for w in window_data if w.get("distance_pct") and w["distance_pct"] > 0.1]
+    far_below = [w for w in window_data if w.get("distance_pct") and w["distance_pct"] < -0.1]
+    close = [w for w in window_data if w.get("distance_pct") is not None and abs(w["distance_pct"]) <= 0.1]
 
     for label, group in [("Far above target (>+0.1%)", far_above), ("Far below target (<-0.1%)", far_below), ("Close to target", close)]:
         if group:
@@ -568,8 +570,8 @@ def analyze_signals(filepath):
     # Combined signals
     print(f"\n--- COMBINED SIGNALS ---")
     # Bullish momentum + above target = strong YES?
-    strong_yes = [w for w in window_data if w["momentum_1m"] > 0.02 and w.get("distance_pct", 0) > 0.05]
-    strong_no = [w for w in window_data if w["momentum_1m"] < -0.02 and w.get("distance_pct", 0) < -0.05]
+    strong_yes = [w for w in window_data if (w.get("momentum_1m") or 0) > 0.02 and (w.get("distance_pct") or 0) > 0.05]
+    strong_no = [w for w in window_data if (w.get("momentum_1m") or 0) < -0.02 and (w.get("distance_pct") or 0) < -0.05]
 
     if strong_yes:
         up_rate = len([w for w in strong_yes if w["outcome"] == "UP"]) / len(strong_yes) * 100
@@ -582,6 +584,128 @@ def analyze_signals(filepath):
         avg_no = (1 - sum(w["open_yes"] for w in strong_no) / len(strong_no)) * 100
         print(f"\nBearish momentum + below target: {len(strong_no)} windows")
         print(f"  DOWN rate: {down_rate:.1f}% vs market {avg_no:.1f}% (edge: {down_rate-avg_no:+.1f}%)")
+
+    # === VOLATILITY TRADING CALCULATOR ===
+    print(f"\n{'='*70}")
+    print("VOLATILITY TRADING STRATEGY CALCULATOR")
+    print(f"{'='*70}")
+
+    # Filter for high volatility windows
+    high_vol_windows = [w for w in window_data if (w.get("volatility_5m") or 0) > 0.1]
+
+    if len(high_vol_windows) < 10:
+        print("\nNot enough high-volatility windows for strategy analysis.")
+    else:
+        # Overall high-vol stats
+        hv_up_rate = len([w for w in high_vol_windows if w["outcome"] == "UP"]) / len(high_vol_windows)
+        hv_market = sum(w["open_yes"] for w in high_vol_windows) / len(high_vol_windows)
+        hv_edge = hv_up_rate - hv_market
+
+        print(f"\n--- HIGH VOLATILITY STRATEGY (volatility_5m > 0.1%) ---")
+        print(f"Total qualifying windows: {len(high_vol_windows)}")
+        print(f"Actual UP rate: {hv_up_rate*100:.1f}%")
+        print(f"Market implied: {hv_market*100:.1f}%")
+        print(f"Raw edge: {hv_edge*100:+.1f}%")
+
+        # By asset during high volatility
+        print(f"\n--- HIGH-VOL EDGE BY ASSET ---")
+        print(f"{'Asset':<8} {'N':<6} {'UP Rate':<10} {'Market':<10} {'Edge':<10} {'Avg Spread':<12} {'Net Edge':<10}")
+        print("-" * 75)
+
+        hv_by_asset = defaultdict(list)
+        for w in high_vol_windows:
+            hv_by_asset[w.get("asset", "UNKNOWN")].append(w)
+
+        best_assets = []
+        for asset in sorted(hv_by_asset.keys()):
+            aws = hv_by_asset[asset]
+            if len(aws) >= 5:
+                up_rate = len([w for w in aws if w["outcome"] == "UP"]) / len(aws)
+                market = sum(w["open_yes"] for w in aws) / len(aws)
+                edge = up_rate - market
+                avg_spread = sum(_num(w.get("spread")) for w in aws) / len(aws)
+                net_edge = edge - avg_spread  # Edge minus spread cost
+
+                flag = "<<<" if net_edge > 0.03 else ""
+                print(f"{asset:<8} {len(aws):<6} {up_rate*100:>6.1f}%   {market*100:>6.1f}%   {edge*100:>+6.1f}%   {avg_spread*100:>8.2f}c   {net_edge*100:>+6.1f}% {flag}")
+
+                if net_edge > 0.03:
+                    best_assets.append((asset, len(aws), edge*100, net_edge*100))
+
+        # Profitability simulation
+        print(f"\n--- EXPECTED VALUE SIMULATION ---")
+        print("Assuming $10 bet per qualifying window:")
+
+        for vol_threshold in [0.08, 0.10, 0.12, 0.15, 0.20]:
+            vol_windows = [w for w in window_data if (w.get("volatility_5m") or 0) > vol_threshold]
+            if len(vol_windows) >= 20:
+                up_rate = len([w for w in vol_windows if w["outcome"] == "UP"]) / len(vol_windows)
+                market = sum(w["open_yes"] for w in vol_windows) / len(vol_windows)
+                avg_spread = sum(_num(w.get("spread")) for w in vol_windows) / len(vol_windows)
+                edge = up_rate - market
+                net_edge = edge - avg_spread
+
+                # EV calculation: edge * stake
+                ev_per_bet = net_edge * 10
+                total_bets = len(vol_windows)
+                total_ev = ev_per_bet * total_bets
+
+                print(f"\nVolatility > {vol_threshold*100:.0f}%: {len(vol_windows)} windows")
+                print(f"  Edge: {edge*100:+.1f}% | Spread cost: {avg_spread*100:.2f}% | Net: {net_edge*100:+.1f}%")
+                print(f"  EV per $10 bet: ${ev_per_bet:.2f}")
+                print(f"  Total EV over period: ${total_ev:.2f}")
+
+        # Best combined conditions
+        print(f"\n--- BEST COMBINED CONDITIONS ---")
+
+        # High vol + bullish momentum
+        hv_bullish = [w for w in window_data if (w.get("volatility_5m") or 0) > 0.1 and (w.get("momentum_1m") or 0) > 0.02]
+        if len(hv_bullish) >= 10:
+            up_rate = len([w for w in hv_bullish if w["outcome"] == "UP"]) / len(hv_bullish)
+            market = sum(w["open_yes"] for w in hv_bullish) / len(hv_bullish)
+            avg_spread = sum(_num(w.get("spread")) for w in hv_bullish) / len(hv_bullish)
+            edge = up_rate - market
+            net_edge = edge - avg_spread
+            print(f"\nHigh Vol + Bullish Momentum: {len(hv_bullish)} windows")
+            print(f"  UP rate: {up_rate*100:.1f}% | Market: {market*100:.1f}% | Edge: {edge*100:+.1f}% | Net: {net_edge*100:+.1f}%")
+
+        # High vol + bearish momentum (bet NO)
+        hv_bearish = [w for w in window_data if (w.get("volatility_5m") or 0) > 0.1 and (w.get("momentum_1m") or 0) < -0.02]
+        if len(hv_bearish) >= 10:
+            down_rate = len([w for w in hv_bearish if w["outcome"] == "DOWN"]) / len(hv_bearish)
+            market_no = 1 - sum(w["open_yes"] for w in hv_bearish) / len(hv_bearish)
+            avg_spread = sum(_num(w.get("spread")) for w in hv_bearish) / len(hv_bearish)
+            edge = down_rate - market_no
+            net_edge = edge - avg_spread
+            print(f"\nHigh Vol + Bearish Momentum (bet NO): {len(hv_bearish)} windows")
+            print(f"  DOWN rate: {down_rate*100:.1f}% | Market NO: {market_no*100:.1f}% | Edge: {edge*100:+.1f}% | Net: {net_edge*100:+.1f}%")
+
+        # High vol + far from target
+        hv_far_above = [w for w in window_data if (w.get("volatility_5m") or 0) > 0.1 and (w.get("distance_pct") or 0) > 0.1]
+        if len(hv_far_above) >= 10:
+            up_rate = len([w for w in hv_far_above if w["outcome"] == "UP"]) / len(hv_far_above)
+            market = sum(w["open_yes"] for w in hv_far_above) / len(hv_far_above)
+            edge = up_rate - market
+            print(f"\nHigh Vol + FarAbove Target: {len(hv_far_above)} windows")
+            print(f"  UP rate: {up_rate*100:.1f}% | Market: {market*100:.1f}% | Edge: {edge*100:+.1f}%")
+
+        # Summary recommendation
+        print(f"\n{'='*70}")
+        print("TRADING RECOMMENDATION")
+        print(f"{'='*70}")
+
+        if best_assets:
+            print("\nBEST OPPORTUNITIES (net edge > 3% after spread):")
+            for asset, n, edge, net in best_assets:
+                print(f"  - {asset}: {n} windows, {edge:+.1f}% edge, {net:+.1f}% net")
+
+        if hv_edge > 0.05:
+            print(f"\n✅ HIGH-VOLATILITY YES STRATEGY VIABLE")
+            print(f"   When volatility_5m > 0.1%, bet YES on BTC (lowest spread)")
+            print(f"   Expected edge: ~{hv_edge*100:.1f}% per trade")
+            print(f"   Recommend: Start with small bets ($5-10) to validate")
+        else:
+            print(f"\n⚠️  Edge exists but marginal. Continue collecting data.")
 
 
 def analyze_lag_data(filepath):
