@@ -13,6 +13,35 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+
+def _num(value, default=0):
+    """Coerce a possibly-None numeric field (collector writes null when data is missing)."""
+    return default if value is None else value
+
+
+def _quoted_mid(tick):
+    """Return yes_mid only when the tick carries a real quote.
+
+    The collector logs yes_mid as null (or bid/ask as 0/0) when the order
+    book is empty - those ticks have no price information.
+    """
+    mid = tick.get("yes_mid")
+    if mid is None:
+        return None
+    if tick.get("yes_bid") == 0 and tick.get("yes_ask") == 0:
+        return None
+    return mid
+
+
+def _last_quoted_mid(ticks):
+    """Last usable yes_mid from a list of ticks, or None if no tick has a quote."""
+    for t in reversed(ticks):
+        mid = _quoted_mid(t)
+        if mid is not None:
+            return mid
+    return None
+
+
 def analyze_main_data(filepath):
     """Analyze the main kalshi_data file."""
     print(f"\n{'='*70}")
@@ -82,13 +111,13 @@ def analyze_main_data(filepath):
         bucket_ticks = []
         for ticker, ticker_ticks in markets_15m.items():
             for t in ticker_ticks:
-                secs = t.get('secs_remaining', -1)
-                if low <= secs < high and t.get('yes_mid'):
+                secs = t.get('secs_remaining')
+                if secs is not None and low <= secs < high and t.get('yes_mid'):
                     bucket_ticks.append(t)
 
         if bucket_ticks:
             yes_mids = [t['yes_mid'] for t in bucket_ticks]
-            spreads = [t.get('spread', 0) for t in bucket_ticks]
+            spreads = [_num(t.get('spread')) for t in bucket_ticks]
             distances = [t.get('distance_pct') for t in bucket_ticks if t.get('distance_pct') is not None]
 
             print(f"\n{bucket_name} ({len(bucket_ticks):,} ticks):")
@@ -104,9 +133,9 @@ def analyze_main_data(filepath):
 
     outcomes = {"UP": 0, "DOWN": 0, "UNCERTAIN": 0}
     for ticker, ticker_ticks in markets_15m.items():
-        final_ticks = [t for t in ticker_ticks if t.get('secs_remaining', 999) <= 5]
-        if final_ticks:
-            final_yes = final_ticks[-1].get('yes_mid', 0.5)
+        final_ticks = [t for t in ticker_ticks if _num(t.get('secs_remaining'), 999) <= 5]
+        final_yes = _last_quoted_mid(final_ticks)
+        if final_yes is not None:
             if final_yes > 0.9:
                 outcomes["UP"] += 1
             elif final_yes < 0.1:
@@ -137,9 +166,9 @@ def analyze_main_data(filepath):
         if not asset:
             asset = ticker_ticks[0].get('asset', 'UNKNOWN') if ticker_ticks else 'UNKNOWN'
 
-        final_ticks = [t for t in ticker_ticks if t.get('secs_remaining', 999) <= 5]
-        if final_ticks:
-            final_yes = final_ticks[-1].get('yes_mid', 0.5)
+        final_ticks = [t for t in ticker_ticks if _num(t.get('secs_remaining'), 999) <= 5]
+        final_yes = _last_quoted_mid(final_ticks)
+        if final_yes is not None:
             if final_yes > 0.9:
                 asset_outcomes[asset]["UP"] += 1
             elif final_yes < 0.1:
@@ -176,10 +205,10 @@ def analyze_main_data(filepath):
         print(f"  Avg: {sum(all_spreads)/len(all_spreads)*100:.2f}c")
 
         # Spread by distance from target
-        close_spreads = [t.get('spread', 0) for t in ticks
+        close_spreads = [_num(t.get('spread')) for t in ticks
                         if t.get('distance_pct') is not None
                         and abs(t.get('distance_pct', 999)) < 0.05]
-        far_spreads = [t.get('spread', 0) for t in ticks
+        far_spreads = [_num(t.get('spread')) for t in ticks
                       if t.get('distance_pct') is not None
                       and abs(t.get('distance_pct', 0)) >= 0.1]
 
@@ -215,16 +244,19 @@ def analyze_edge_opportunities(filepath):
     windows = []
     for ticker, ticker_ticks in by_ticker.items():
         # Get opening tick (800-900s remaining) - prefer one with momentum signals
-        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900 and t.get("momentum_1m") is not None]
+        opening = [t for t in ticker_ticks if 750 < _num(t.get("secs_remaining")) < 900
+                   and _quoted_mid(t) is not None and t.get("momentum_1m") is not None]
         if not opening:
-            opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
+            opening = [t for t in ticker_ticks if 750 < _num(t.get("secs_remaining")) < 900
+                       and _quoted_mid(t) is not None]
         # Get closing tick
-        closing = [t for t in ticker_ticks if t.get("secs_remaining", 999) <= 5]
+        closing = [t for t in ticker_ticks if _num(t.get("secs_remaining"), 999) <= 5]
 
         if opening and closing:
             open_tick = opening[0]
-            close_tick = closing[-1]
-            final_yes = close_tick.get("yes_mid", 0.5)
+            final_yes = _last_quoted_mid(closing)
+            if final_yes is None:
+                continue
 
             outcome = "UP" if final_yes > 0.9 else "DOWN" if final_yes < 0.1 else None
             if outcome is None:
@@ -250,13 +282,13 @@ def analyze_edge_opportunities(filepath):
                 "asset": asset or "UNKNOWN",
                 "outcome": outcome,
                 "outcome_binary": 1 if outcome == "UP" else 0,
-                "open_yes": open_tick.get("yes_mid", 0.5),
+                "open_yes": _quoted_mid(open_tick),
                 "hour_utc": hour,
                 "distance_pct": open_tick.get("distance_pct"),
                 "momentum_1m": open_tick.get("momentum_1m"),
                 "momentum_5m": open_tick.get("momentum_5m"),
                 "volatility_5m": open_tick.get("volatility_5m"),
-                "spread": open_tick.get("spread", 0),
+                "spread": _num(open_tick.get("spread")),
             })
 
     if len(windows) < 5:
@@ -452,14 +484,16 @@ def analyze_signals(filepath):
     window_data = []
     for ticker, ticker_ticks in by_ticker.items():
         # Get opening tick (around 800-900 seconds remaining)
-        opening = [t for t in ticker_ticks if 750 < t.get("secs_remaining", 0) < 900]
+        opening = [t for t in ticker_ticks if 750 < _num(t.get("secs_remaining")) < 900
+                   and _quoted_mid(t) is not None]
         # Get closing tick (0-10 seconds remaining)
-        closing = [t for t in ticker_ticks if t.get("secs_remaining", 999) <= 10]
+        closing = [t for t in ticker_ticks if _num(t.get("secs_remaining"), 999) <= 10]
 
         if opening and closing:
             open_tick = opening[0]
-            close_tick = closing[-1]
-            final_yes = close_tick.get("yes_mid", 0.5)
+            final_yes = _last_quoted_mid(closing)
+            if final_yes is None:
+                continue
 
             outcome = "UP" if final_yes > 0.9 else "DOWN" if final_yes < 0.1 else "UNCERTAIN"
             if outcome == "UNCERTAIN":
@@ -468,12 +502,12 @@ def analyze_signals(filepath):
             window_data.append({
                 "ticker": ticker,
                 "outcome": outcome,
-                "open_yes": open_tick.get("yes_mid", 0.5),
-                "momentum_1m": open_tick.get("momentum_1m", 0),
-                "momentum_5m": open_tick.get("momentum_5m", 0),
-                "volatility_1m": open_tick.get("volatility_1m", 0),
-                "volatility_5m": open_tick.get("volatility_5m", 0),
-                "distance_pct": open_tick.get("distance_pct", 0),
+                "open_yes": _quoted_mid(open_tick),
+                "momentum_1m": _num(open_tick.get("momentum_1m")),
+                "momentum_5m": _num(open_tick.get("momentum_5m")),
+                "volatility_1m": _num(open_tick.get("volatility_1m")),
+                "volatility_5m": _num(open_tick.get("volatility_5m")),
+                "distance_pct": _num(open_tick.get("distance_pct")),
             })
 
     if not window_data:
